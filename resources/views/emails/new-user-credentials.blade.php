@@ -1,7 +1,11 @@
 <x-emails.layout>
 Hola {{ $name }},
 
+@if (isset($isPasswordReset) && $isPasswordReset)
+Tu contraseña en **{{ $instanceName }}** ha sido restablecida por un administrador.
+@else
 Se ha creado una cuenta para ti en **{{ $instanceName }}**.
+@endif
 
 Estas son tus credenciales de acceso:
 

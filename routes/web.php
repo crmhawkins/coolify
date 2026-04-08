@@ -101,6 +101,13 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 Route::get('/admin', AdminIndex::class)->name('admin.index')->middleware(['auth', 'restrict.client']);
 
 Route::post('/forgot-password', [Controller::class, 'forgot_password'])->name('password.forgot')->middleware('throttle:forgot-password');
+
+// Friendly alias for scoped clients: /clientes and /acceso-clientes both
+// redirect to the standard login page. Lets admins share a clean URL
+// like https://interno.hawkins.es/clientes with their clients.
+Route::get('/clientes', fn () => redirect('/login'))->name('clientes.login');
+Route::get('/acceso-clientes', fn () => redirect('/login'));
+
 Route::get('/realtime', [Controller::class, 'realtime_test'])->middleware('auth');
 Route::get('/verify', [Controller::class, 'verify'])->middleware('auth')->name('verify.email');
 Route::get('/email/verify/{id}/{hash}', [Controller::class, 'email_verify'])->middleware(['auth'])->name('verify.verify');

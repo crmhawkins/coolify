@@ -4,9 +4,9 @@ namespace App\Livewire\User;
 
 use App\Models\Project;
 use App\Models\User;
+use App\Notifications\TransactionalEmails\NewClientCredentials;
 use App\Support\ValidationPatterns;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
-use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Livewire\Component;
@@ -96,9 +96,9 @@ class Create extends Component
 
             $this->generatedPassword = $plainPassword;
             $this->createdEmail = $user->email;
-            $this->loginUrl = config('app.url').'/login';
+            $this->loginUrl = rtrim(base_url(), '/').'/login';
 
-            $this->sendCredentialsEmail($user, $plainPassword, $this->loginUrl);
+            $this->sendCredentialsEmail($user, $plainPassword);
 
             $this->dispatch('success', 'Usuario creado correctamente.');
 
@@ -108,26 +108,41 @@ class Create extends Component
         }
     }
 
-    private function sendCredentialsEmail(User $user, string $plainPassword, string $loginUrl): void
+    /**
+     * Dispatches the credentials email via the current team's configured
+     * email channel (Notifications → Email). EmailChannel reads the
+     * $emails property from the notification to override the recipient
+     * list, so the client receives the mail even though they are not in
+     * the team's emailNotificationSettings recipient list.
+     */
+    private function sendCredentialsEmail(User $user, string $plainPassword): void
     {
         try {
-            if (! is_transactional_emails_enabled()) {
-                $this->emailError = 'El correo transaccional no está configurado. Comparte la contraseña manualmente con el usuario.';
+            $team = currentTeam();
+
+            // EmailChannel requires an EmailNotificationSettings row on the
+            // team; if the relation is missing (freshly installed team that
+            // never opened Notifications → Email), abort gracefully with a
+            // helpful message instead of crashing.
+            if (! $team->emailNotificationSettings) {
+                $this->emailError = 'El team no tiene configuración de email. Entra en Notifications → Email y guarda la configuración SMTP.';
 
                 return;
             }
 
-            $mail = new MailMessage;
-            $mail->view('emails.new-user-credentials', [
-                'name' => $user->name,
-                'email' => $user->email,
-                'password' => $plainPassword,
-                'loginUrl' => $loginUrl,
-                'instanceName' => config('app.name'),
-            ]);
-            $mail->subject('Bienvenido a '.config('app.name'));
+            if (! $team->emailNotificationSettings->smtp_enabled && ! $team->emailNotificationSettings->resend_enabled) {
+                $this->emailError = 'El SMTP (o Resend) del team no está activado. Actívalo en Notifications → Email marcando "Enabled".';
 
-            send_user_an_email($mail, $user->email);
+                return;
+            }
+
+            $team->notify(new NewClientCredentials(
+                user: $user,
+                plainPassword: $plainPassword,
+                loginUrl: $this->loginUrl,
+                instanceName: config('app.name'),
+                isPasswordReset: false,
+            ));
 
             $this->emailSent = true;
         } catch (\Throwable $e) {
@@ -140,4 +155,3 @@ class Create extends Component
         return view('livewire.user.create');
     }
 }
-// resync-marker 2026-04-08

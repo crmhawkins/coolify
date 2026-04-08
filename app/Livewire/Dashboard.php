@@ -18,15 +18,19 @@ class Dashboard extends Component
 
     public function mount()
     {
-        // Scoped client users see only their assigned projects, so the
-        // team-wide dashboard is meaningless for them — send them straight
-        // to the projects list instead. Initialize the typed collections
-        // first so render() will not blow up if Livewire still calls it.
+        // Scoped client users only see their assigned projects on the
+        // Dashboard. They do not see Servers or Private Keys at all — those
+        // sections are hidden in the view (dashboard.blade.php). The project
+        // list is filtered automatically by the RestrictsToClientProjects
+        // global scope on the Project model, so we can use the same query
+        // as admins and let the scope do its job.
         if (auth()->check() && auth()->user()->isClient()) {
             $this->privateKeys = collect();
             $this->servers = collect();
-            $this->projects = collect();
-            $this->redirect(route('project.index'), navigate: true);
+            $this->projects = Project::query()
+                ->with('environments')
+                ->orderByRaw('LOWER(name)')
+                ->get();
 
             return;
         }

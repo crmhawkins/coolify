@@ -104,19 +104,18 @@
         <li class="flex-1 overflow-x-hidden">
             <ul role="list" class="flex flex-col h-full space-y-1.5">
                 @if (isSubscribed() || !isCloud())
+                    <li>
+                        <a title="Dashboard" href="/" {{ wireNavigate() }}
+                            class="{{ request()->is('/') ? 'menu-item-active menu-item' : 'menu-item' }}">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="menu-item-icon" fill="none" viewBox="0 0 24 24"
+                                stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                            </svg>
+                            <span class="menu-item-label">Dashboard</span>
+                        </a>
+                    </li>
                     @if (! auth()->user()->isClient())
-                        <li>
-                            <a title="Dashboard" href="/" {{ wireNavigate() }}
-                                class="{{ request()->is('/') ? 'menu-item-active menu-item' : 'menu-item' }}">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="menu-item-icon" fill="none" viewBox="0 0 24 24"
-                                    stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-                                </svg>
-                                <span class="menu-item-label">Dashboard</span>
-                            </a>
-                        </li>
-                    @endif
                     <li>
                         <a title="Projects" {{ wireNavigate() }}
                             class="{{ request()->is('project/*') || request()->is('projects') ? 'menu-item menu-item-active' : 'menu-item' }}"
@@ -132,6 +131,7 @@
                             <span class="menu-item-label">Projects</span>
                         </a>
                     </li>
+                    @endif
                     @if (! auth()->user()->isClient())
                     <li>
                         <a title="Servers" {{ wireNavigate() }}

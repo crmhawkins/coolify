@@ -4,9 +4,9 @@ namespace App\Livewire\User;
 
 use App\Models\Project;
 use App\Models\User;
+use App\Notifications\TransactionalEmails\NewClientCredentials;
 use App\Support\ValidationPatterns;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
-use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -143,29 +143,38 @@ class Edit extends Component
         }
     }
 
+    /**
+     * Dispatches the password-reset email via the current team's configured
+     * email channel (Notifications → Email). Same contract as the
+     * credentials email in User\Create.
+     */
     private function sendCredentialsEmail(User $user, string $plainPassword): void
     {
         $this->emailSent = false;
         $this->emailError = null;
 
         try {
-            if (! is_transactional_emails_enabled()) {
-                $this->emailError = 'El correo transaccional no está configurado. Comparte la contraseña manualmente con el usuario.';
+            $team = currentTeam();
+
+            if (! $team->emailNotificationSettings) {
+                $this->emailError = 'El team no tiene configuración de email. Entra en Notifications → Email y guarda la configuración SMTP.';
 
                 return;
             }
 
-            $mail = new MailMessage;
-            $mail->view('emails.new-user-credentials', [
-                'name' => $user->name,
-                'email' => $user->email,
-                'password' => $plainPassword,
-                'loginUrl' => config('app.url').'/login',
-                'instanceName' => config('app.name'),
-            ]);
-            $mail->subject('Tu contraseña en '.config('app.name').' ha sido restablecida');
+            if (! $team->emailNotificationSettings->smtp_enabled && ! $team->emailNotificationSettings->resend_enabled) {
+                $this->emailError = 'El SMTP (o Resend) del team no está activado. Actívalo en Notifications → Email marcando "Enabled".';
 
-            send_user_an_email($mail, $user->email);
+                return;
+            }
+
+            $team->notify(new NewClientCredentials(
+                user: $user,
+                plainPassword: $plainPassword,
+                loginUrl: rtrim(base_url(), '/').'/login',
+                instanceName: config('app.name'),
+                isPasswordReset: true,
+            ));
 
             $this->emailSent = true;
         } catch (\Throwable $e) {

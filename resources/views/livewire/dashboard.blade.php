@@ -17,7 +17,7 @@
     <section class="-mt-2">
         <div class="flex items-center gap-2 pb-2">
             <h3>Projects</h3>
-            @if ($projects->count() > 0)
+            @if ($projects->count() > 0 && ! auth()->user()->isClient())
                 <x-modal-input buttonTitle="Add" title="New Project">
                     <x-slot:content>
                         <button
@@ -70,16 +70,23 @@
         @else
             <div class="flex flex-col gap-1">
                 <div class='font-bold dark:text-warning'>No projects found.</div>
-                <div class="flex items-center gap-1">
-                    <x-modal-input buttonTitle="Add" title="New Project">
-                        <livewire:project.add-empty />
-                    </x-modal-input> your first project or
-                    go to the <a class="underline dark:text-white" href="{{ route('onboarding') }}" {{ wireNavigate() }}>onboarding</a> page.
-                </div>
+                @if (! auth()->user()->isClient())
+                    <div class="flex items-center gap-1">
+                        <x-modal-input buttonTitle="Add" title="New Project">
+                            <livewire:project.add-empty />
+                        </x-modal-input> your first project or
+                        go to the <a class="underline dark:text-white" href="{{ route('onboarding') }}" {{ wireNavigate() }}>onboarding</a> page.
+                    </div>
+                @else
+                    <div class="text-sm text-neutral-500">
+                        No tienes proyectos asignados. Contacta con el administrador.
+                    </div>
+                @endif
             </div>
         @endif
     </section>
 
+    @if (! auth()->user()->isClient())
     <section>
         <div class="flex items-center gap-2 pb-2">
             <h3>Servers</h3>
@@ -157,5 +164,6 @@
             @endif
         @endif
     </section>
+    @endif
 </div>
 {{-- resync-marker 2026-04-08 --}}
