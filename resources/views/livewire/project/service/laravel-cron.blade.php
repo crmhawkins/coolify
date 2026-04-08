@@ -7,8 +7,6 @@
 
     <div class="flex flex-col h-full gap-8 sm:flex-row">
         <div class="sub-menu-wrapper">
-            <a class="sub-menu-item" target="_blank" href="{{ $service->documentation() }}"><span class="menu-item-label">Documentation</span>
-                <x-external-link /></a>
             <a class='sub-menu-item' {{ wireNavigate() }}
                 href="{{ route('project.service.configuration', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">General</span></a>
             <a class='sub-menu-item' {{ wireNavigate() }}
@@ -121,7 +119,7 @@
                                     </button>
                                 </div>
 
-                                {{-- Card body: badges for interval + next run --}}
+                                {{-- Card body: badges for interval + next run + status --}}
                                 <div class="flex flex-wrap items-center gap-2 px-4 py-3">
                                     <span
                                         class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono"
@@ -145,6 +143,77 @@
                                             Próxima: {{ $task['next_due'] }}
                                         </span>
                                     @endif
+
+                                    {{-- Status badge (hybrid A+C plan):
+                                         • success → green "Ejecutó correctamente"
+                                         • error   → red "Falló" + "Ver error" toggle
+                                         • log-warning → amber "Error reciente en log"
+                                         • unknown → nothing rendered --}}
+                                    @php
+                                        $taskStatus = $task['status'] ?? 'unknown';
+                                        $statusLabel = $task['status_label'] ?? '';
+                                        $statusAt = $task['status_at'] ?? '';
+                                        $hasOutput = ! empty($task['status_output']);
+                                    @endphp
+                                    @if ($taskStatus === 'success')
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
+                                            style="background-color:rgba(34,197,94,0.15);color:#86efac;border:1px solid rgba(34,197,94,0.3);"
+                                            @if ($statusAt) title="{{ $statusAt }}" @endif
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                                            </svg>
+                                            {{ $statusLabel ?: 'Ejecutó correctamente' }}
+                                        </span>
+                                    @elseif ($taskStatus === 'error')
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
+                                            style="background-color:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.3);"
+                                            @if ($statusAt) title="{{ $statusAt }}" @endif
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"/>
+                                            </svg>
+                                            {{ $statusLabel ?: 'Falló' }}
+                                        </span>
+                                        @if ($hasOutput)
+                                            <button
+                                                type="button"
+                                                wire:click="toggleErrorPanel({{ $taskIndex }})"
+                                                class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold transition-colors"
+                                                style="background-color:#27272a;color:#fca5a5;border:1px solid #3f3f46;"
+                                                onmouseover="this.style.backgroundColor='#3f3f46'"
+                                                onmouseout="this.style.backgroundColor='#27272a'"
+                                            >
+                                                {{ ! empty($expandedErrors[$taskIndex]) ? 'Ocultar error' : 'Ver error' }}
+                                            </button>
+                                        @endif
+                                    @elseif ($taskStatus === 'log-warning')
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
+                                            style="background-color:rgba(245,158,11,0.15);color:#fcd34d;border:1px solid rgba(245,158,11,0.3);"
+                                            @if ($statusAt) title="{{ $statusAt }}" @endif
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                            </svg>
+                                            {{ $statusLabel ?: 'Error reciente en log' }}
+                                        </span>
+                                        @if ($hasOutput)
+                                            <button
+                                                type="button"
+                                                wire:click="toggleErrorPanel({{ $taskIndex }})"
+                                                class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold transition-colors"
+                                                style="background-color:#27272a;color:#fcd34d;border:1px solid #3f3f46;"
+                                                onmouseover="this.style.backgroundColor='#3f3f46'"
+                                                onmouseout="this.style.backgroundColor='#27272a'"
+                                            >
+                                                {{ ! empty($expandedErrors[$taskIndex]) ? 'Ocultar log' : 'Ver log' }}
+                                            </button>
+                                        @endif
+                                    @endif
+
                                     @if (! empty($task['last_run']))
                                         <span
                                             class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs"
@@ -155,6 +224,27 @@
                                         </span>
                                     @endif
                                 </div>
+
+                                {{-- Collapsible error panel. Shown when the user
+                                     clicks "Ver error" on a failed task or
+                                     when executeTaskNow auto-expanded it. --}}
+                                @if (! empty($expandedErrors[$taskIndex]) && ! empty($task['status_output']))
+                                    <div
+                                        class="border-t px-4 py-3"
+                                        style="border-color:#27272a;"
+                                    >
+                                        <div class="mb-1 text-xs font-semibold" style="color:#a1a1aa;">
+                                            Salida del comando
+                                            @if (! empty($task['status_at']))
+                                                · <span style="color:#71717a;">{{ $task['status_at'] }}</span>
+                                            @endif
+                                        </div>
+                                        <pre
+                                            class="whitespace-pre-wrap break-words rounded px-3 py-2 text-xs font-mono max-h-60 overflow-auto"
+                                            style="background-color:#0a0a0a;color:#fca5a5;border:1px solid #27272a;"
+                                        >{{ $task['status_output'] }}</pre>
+                                    </div>
+                                @endif
 
                                 {{-- Card footer: origin / description if set --}}
                                 @if (! empty($task['description']))

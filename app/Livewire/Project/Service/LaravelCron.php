@@ -4,6 +4,7 @@ namespace App\Livewire\Project\Service;
 
 use App\Models\Service;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\Cache;
 use Livewire\Component;
 
 class LaravelCron extends Component
@@ -30,8 +31,15 @@ class LaravelCron extends Component
 
     public bool $isLoadingScheduleList = false;
 
-    /** @var array<int, array{command: string, expression: string, next_due: string, last_run: string, description: string}> */
+    /** @var array<int, array{command: string, expression: string, next_due: string, last_run: string, description: string, status: string, status_label: string, status_output: string, status_source: string, status_at: string}> */
     public array $scheduledTasks = [];
+
+    /**
+     * Index of tasks whose error panel is expanded. Keyed by task index.
+     *
+     * @var array<int, bool>
+     */
+    public array $expandedErrors = [];
 
     public function mount(): void
     {
@@ -307,6 +315,11 @@ class LaravelCron extends Component
             $this->dispatch('error', 'Error loading schedule list: '.$e->getMessage());
         } finally {
             $this->isLoadingScheduleList = false;
+            // Enrich the parsed tasks with manual-run statuses (from cache)
+            // and scheduler-run warnings (from laravel.log). Running this in
+            // `finally` guarantees it executes after every early-return path
+            // in the try block without duplicating the call at each site.
+            $this->attachTaskStatuses();
         }
     }
 
@@ -606,6 +619,15 @@ class LaravelCron extends Component
             return;
         }
 
+        // Closure tasks cannot be re-executed from the UI because we do not
+        // know what PHP code was registered inside them — artisan has no
+        // sub-command for "run this specific closure from the Kernel".
+        if (str_starts_with($taskCommand, 'Closure')) {
+            $this->dispatch('error', 'No se pueden ejecutar manualmente las tareas Closure definidas inline en Kernel.php.');
+
+            return;
+        }
+
         try {
             $context = $this->getSelectedContainerApplicationContext();
             if (! $context) {
@@ -619,6 +641,12 @@ class LaravelCron extends Component
 
             $tokens = preg_split('/\s+/', $taskCommand) ?: [];
             $tokens = array_values(array_filter($tokens, fn ($t) => $t !== ''));
+
+            // "php artisan xxx" → drop the leading "php artisan"
+            if (count($tokens) >= 2 && strtolower($tokens[0]) === 'php' && strtolower($tokens[1]) === 'artisan') {
+                $tokens = array_slice($tokens, 2);
+            }
+
             foreach ($tokens as $token) {
                 if (preg_match('/[;&|`$<>\\\\]/', (string) $token)) {
                     $this->dispatch('error', 'Invalid task command.');
@@ -627,16 +655,60 @@ class LaravelCron extends Component
                 }
             }
 
+            // Execute wrapped in `set -o pipefail; ... ; echo __EXIT__=$?` so
+            // we can capture the artisan exit code even when instant_remote_process
+            // does not expose it directly.
             $artisanArgs = implode(' ', array_map('escapeshellarg', $tokens));
-            $command = "docker exec {$escapedContainer} php /var/www/html/artisan {$artisanArgs}";
+            $innerScript = "php /var/www/html/artisan {$artisanArgs} 2>&1; echo \"__EXIT__=\$?\"";
+            $command = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($innerScript);
             if ($server->isNonRoot()) {
                 $command = "sudo {$command}";
             }
 
-            $this->schedulerOutput = (string) (instant_remote_process([$command], $server, false) ?? '');
-            $this->dispatch('success', 'Task executed successfully.');
+            $rawOutput = (string) (instant_remote_process([$command], $server, false) ?? '');
+
+            // Extract the exit code and strip the sentinel from the displayed
+            // output so the user sees only what artisan actually printed.
+            $exitCode = null;
+            if (preg_match('/__EXIT__=(\d+)\s*$/', $rawOutput, $m)) {
+                $exitCode = (int) $m[1];
+                $rawOutput = preg_replace('/__EXIT__=\d+\s*$/', '', $rawOutput) ?: $rawOutput;
+            }
+            $rawOutput = rtrim($rawOutput);
+
+            $ok = $exitCode === 0;
+            $status = $ok ? 'success' : 'error';
+            $label = $ok ? 'Ejecutó correctamente' : 'Falló';
+
+            $this->persistTaskStatus($index, [
+                'command' => $taskCommand,
+                'status' => $status,
+                'status_label' => $label,
+                'status_output' => $rawOutput,
+                'status_source' => 'manual',
+                'status_at' => now()->format('Y-m-d H:i:s'),
+            ]);
+
+            $this->schedulerOutput = '';
+
+            if ($ok) {
+                $this->dispatch('success', 'Task executed successfully.');
+            } else {
+                $this->dispatch('error', "Task finished with exit code {$exitCode}.");
+                // Auto-expand the error panel on failure so the user sees it
+                // without having to click.
+                $this->expandedErrors[$index] = true;
+            }
         } catch (\Throwable $e) {
-            $this->schedulerOutput = $e->getMessage();
+            $this->persistTaskStatus($index, [
+                'command' => $taskCommand,
+                'status' => 'error',
+                'status_label' => 'Falló',
+                'status_output' => $e->getMessage(),
+                'status_source' => 'manual',
+                'status_at' => now()->format('Y-m-d H:i:s'),
+            ]);
+            $this->expandedErrors[$index] = true;
             $this->dispatch('error', 'Error executing task: '.$e->getMessage());
         }
     }
@@ -734,10 +806,240 @@ class LaravelCron extends Component
         }
     }
 
+    /**
+     * Toggles the expanded/collapsed state of the error panel for a given
+     * task index. Called from the card's "Ver error" button in the view.
+     */
+    public function toggleErrorPanel(int $index): void
+    {
+        if (isset($this->expandedErrors[$index]) && $this->expandedErrors[$index]) {
+            unset($this->expandedErrors[$index]);
+
+            return;
+        }
+
+        $this->expandedErrors[$index] = true;
+    }
+
+    /**
+     * Returns the cache key used to store per-container task status.
+     * We key by service id + container name so each Laravel RootKit gets
+     * its own bucket and statuses do not bleed between projects.
+     */
+    private function taskStatusCacheKey(?string $containerName = null): string
+    {
+        if ($containerName === null) {
+            $context = $this->getSelectedContainerApplicationContext();
+            $containerName = $context['container']['container_name'] ?? 'unknown';
+        }
+
+        return 'laravel-cron-task-status:'.$this->service->id.':'.$containerName;
+    }
+
+    /**
+     * Stores the manual-run status for a single task in cache (24h TTL) and
+     * updates the in-memory scheduledTasks array so the view reflects it
+     * immediately on the next render cycle without a full reload.
+     *
+     * @param  array{command: string, status: string, status_label: string, status_output: string, status_source: string, status_at: string}  $payload
+     */
+    private function persistTaskStatus(int $index, array $payload): void
+    {
+        try {
+            $key = $this->taskStatusCacheKey();
+            $bucket = Cache::get($key, []);
+            if (! is_array($bucket)) {
+                $bucket = [];
+            }
+
+            // Key entries in the cache by the task command so re-runs of
+            // the same command overwrite the previous entry instead of
+            // piling up, and so a reload of the list picks them up
+            // regardless of the array index in scheduledTasks.
+            $bucket[$payload['command']] = $payload;
+
+            Cache::put($key, $bucket, now()->addHours(24));
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
+        if (isset($this->scheduledTasks[$index])) {
+            $this->scheduledTasks[$index]['status'] = $payload['status'];
+            $this->scheduledTasks[$index]['status_label'] = $payload['status_label'];
+            $this->scheduledTasks[$index]['status_output'] = $payload['status_output'];
+            $this->scheduledTasks[$index]['status_source'] = $payload['status_source'];
+            $this->scheduledTasks[$index]['status_at'] = $payload['status_at'];
+        }
+    }
+
+    /**
+     * Attaches manual-run statuses from cache and scheduler-run warnings
+     * from the Laravel log to the in-memory task list. Called from
+     * loadScheduleList() once the tasks have been parsed so the two data
+     * sources converge onto the same array the blade consumes.
+     */
+    private function attachTaskStatuses(): void
+    {
+        if ($this->scheduledTasks === []) {
+            return;
+        }
+
+        // Step 1 — manual runs from cache (Option C of the hybrid plan).
+        $cacheBucket = [];
+        try {
+            $cacheBucket = Cache::get($this->taskStatusCacheKey(), []);
+            if (! is_array($cacheBucket)) {
+                $cacheBucket = [];
+            }
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
+        // Step 2 — recent scheduler-run errors from laravel.log (Option A).
+        $logErrors = $this->scanLaravelLogForRecentErrors();
+
+        foreach ($this->scheduledTasks as $i => $task) {
+            $command = (string) ($task['command'] ?? '');
+
+            // Default: no status known.
+            $this->scheduledTasks[$i]['status'] = 'unknown';
+            $this->scheduledTasks[$i]['status_label'] = '';
+            $this->scheduledTasks[$i]['status_output'] = '';
+            $this->scheduledTasks[$i]['status_source'] = '';
+            $this->scheduledTasks[$i]['status_at'] = '';
+
+            // Cache (manual run) takes precedence because it is deterministic.
+            if (isset($cacheBucket[$command]) && is_array($cacheBucket[$command])) {
+                $entry = $cacheBucket[$command];
+                $this->scheduledTasks[$i]['status'] = (string) ($entry['status'] ?? 'unknown');
+                $this->scheduledTasks[$i]['status_label'] = (string) ($entry['status_label'] ?? '');
+                $this->scheduledTasks[$i]['status_output'] = (string) ($entry['status_output'] ?? '');
+                $this->scheduledTasks[$i]['status_source'] = (string) ($entry['status_source'] ?? 'manual');
+                $this->scheduledTasks[$i]['status_at'] = (string) ($entry['status_at'] ?? '');
+
+                continue;
+            }
+
+            // Fallback — log grep. If the command name appears in an ERROR
+            // line within the last 24h of laravel.log, flag it as a log
+            // warning (amber). A clean log means nothing, so we leave
+            // status='unknown' (the view will render nothing).
+            $needle = $this->commandNameForLogMatching($command);
+            if ($needle !== '' && isset($logErrors[$needle])) {
+                $this->scheduledTasks[$i]['status'] = 'log-warning';
+                $this->scheduledTasks[$i]['status_label'] = 'Error reciente en log';
+                $this->scheduledTasks[$i]['status_output'] = (string) $logErrors[$needle]['excerpt'];
+                $this->scheduledTasks[$i]['status_source'] = 'log';
+                $this->scheduledTasks[$i]['status_at'] = (string) $logErrors[$needle]['when'];
+            }
+        }
+    }
+
+    /**
+     * Extracts the bare artisan command name from a "command" field that
+     * can look like "php artisan reservas:check-overlaps", "reservas:x",
+     * or "Closure". Used to match against grep hits inside laravel.log.
+     */
+    private function commandNameForLogMatching(string $command): string
+    {
+        $command = trim($command);
+        if ($command === '' || str_starts_with($command, 'Closure')) {
+            return '';
+        }
+
+        $tokens = preg_split('/\s+/', $command) ?: [];
+        if (count($tokens) >= 2 && strtolower($tokens[0]) === 'php' && strtolower($tokens[1]) === 'artisan') {
+            return (string) ($tokens[2] ?? '');
+        }
+
+        return (string) ($tokens[0] ?? '');
+    }
+
+    /**
+     * Greps storage/logs/laravel.log inside the selected container for
+     * recent ERROR lines and returns a map keyed by the artisan command
+     * name so attachTaskStatuses() can annotate each row.
+     *
+     * Runs `tail -n 2000` so we cap the IO cost at ~200 KB per reload
+     * regardless of how big the log is.
+     *
+     * @return array<string, array{excerpt: string, when: string}>
+     */
+    private function scanLaravelLogForRecentErrors(): array
+    {
+        try {
+            $context = $this->getSelectedContainerApplicationContext();
+            if (! $context) {
+                return [];
+            }
+
+            $server = $context['server'];
+            $escapedContainer = $context['escapedContainer'];
+
+            // tail + grep for local.ERROR lines. We keep the command and
+            // the surrounding 2 lines for context. `|| true` so an empty
+            // match does not propagate a non-zero exit.
+            $script = "tail -n 2000 /var/www/html/storage/logs/laravel.log 2>/dev/null "
+                ."| grep -E 'local\\.ERROR|production\\.ERROR|local\\.CRITICAL|production\\.CRITICAL' || true";
+            $command = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($script);
+            if ($server->isNonRoot()) {
+                $command = "sudo {$command}";
+            }
+
+            $raw = (string) (instant_remote_process([$command], $server, false) ?? '');
+            if (trim($raw) === '') {
+                return [];
+            }
+        } catch (\Throwable $e) {
+            report($e);
+
+            return [];
+        }
+
+        // Build a lookup: artisan command name → last error line excerpt.
+        // Log lines look like:
+        //   [2026-04-09 08:13:22] local.ERROR: Command "reservas:check-overlaps" failed: ...
+        //   [2026-04-09 08:12:01] local.ERROR: Something crashed in reservas:generar-token-dni ...
+        $result = [];
+        foreach (preg_split('/\r?\n/', $raw) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+
+            $when = '';
+            if (preg_match('/^\[([^\]]+)\]/', $line, $dm)) {
+                $when = $dm[1];
+            }
+
+            // Try to extract the artisan command name that appears in the
+            // line. We look for 3 patterns Laravel uses: Command "xxx",
+            // command 'xxx', and bare xxx:yyy tokens.
+            $candidates = [];
+            if (preg_match_all('/Command\s+"([^"\s]+:[^"\s]+)"/', $line, $m)) {
+                $candidates = array_merge($candidates, $m[1]);
+            }
+            if (preg_match_all("/command\\s+'([^'\\s]+:[^'\\s]+)'/", $line, $m)) {
+                $candidates = array_merge($candidates, $m[1]);
+            }
+            if (preg_match_all('/\b([a-z][a-z0-9\-]*:[a-z][a-z0-9\-]*)\b/', $line, $m)) {
+                $candidates = array_merge($candidates, $m[1]);
+            }
+
+            foreach (array_unique($candidates) as $name) {
+                // Only keep the most recent (last) error per command.
+                $result[$name] = [
+                    'excerpt' => $line,
+                    'when' => $when,
+                ];
+            }
+        }
+
+        return $result;
+    }
+
     public function render()
     {
         return view('livewire.project.service.laravel-cron');
     }
 }
-
-// resync-marker 2026-04-08

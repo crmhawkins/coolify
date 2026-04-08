@@ -570,6 +570,14 @@ class LaravelArtisan extends Component
             $this->dispatch('error', 'Error running artisan: '.$e->getMessage());
         } finally {
             $this->isRunning = false;
+            // Clear the input so the user can immediately type or click
+            // another command without manually deleting the previous one.
+            // Description and filtered-dropdown state are also reset so
+            // nothing stale is shown under the input.
+            $this->selectedCommand = '';
+            $this->selectedCommandDescription = '';
+            $this->selectedCommandHelp = '';
+            $this->filteredArtisanCommands = [];
         }
     }
 
