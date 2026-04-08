@@ -138,7 +138,17 @@
                             La salida del comando aparecerá aquí después de ejecutarlo.
                         </div>
                     @else
-                        <pre class="w-full whitespace-pre-wrap break-words bg-white dark:bg-coolgray-900 text-gray-900 dark:text-gray-100 border border-coolgray-300 dark:border-coolgray-600 px-4 py-3 rounded text-sm font-mono min-h-[20rem] max-h-[70vh] overflow-auto">{{ $output }}</pre>
+                        {{-- Same fix as the suggestions dropdown: the live
+                             container has a white background for this <pre>
+                             regardless of the dark theme, but
+                             `dark:text-gray-100` wins and paints the text
+                             light-grey on white (invisible). Inline styles
+                             pin both the background and the text colour so
+                             the output is always readable on any theme. --}}
+                        <pre
+                            class="w-full whitespace-pre-wrap break-words border border-gray-300 px-4 py-3 rounded text-sm font-mono min-h-[20rem] max-h-[70vh] overflow-auto"
+                            style="background-color:#ffffff;color:#0b1220;"
+                        >{{ $output }}</pre>
                     @endif
                 </div>
             @endif
