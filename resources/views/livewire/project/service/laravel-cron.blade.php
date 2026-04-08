@@ -148,14 +148,28 @@
                                          • success → green "Ejecutó correctamente"
                                          • error   → red "Falló" + "Ver error" toggle
                                          • log-warning → amber "Error reciente en log"
-                                         • unknown → nothing rendered --}}
+                                         • unknown → neutral "Sin datos" so every
+                                           card shows a status column at a glance.
+                                           This is the baseline state before any
+                                           manual run or log-level error appears. --}}
                                     @php
                                         $taskStatus = $task['status'] ?? 'unknown';
                                         $statusLabel = $task['status_label'] ?? '';
                                         $statusAt = $task['status_at'] ?? '';
                                         $hasOutput = ! empty($task['status_output']);
                                     @endphp
-                                    @if ($taskStatus === 'success')
+                                    @if ($taskStatus === 'unknown' || $taskStatus === '')
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
+                                            style="background-color:#27272a;color:#a1a1aa;border:1px solid #3f3f46;"
+                                            title="Aún no se ha registrado ninguna ejecución manual ni se ha detectado error reciente en laravel.log. Pulsa 'Ejecutar' para registrar el estado."
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                            </svg>
+                                            Sin datos
+                                        </span>
+                                    @elseif ($taskStatus === 'success')
                                         <span
                                             class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
                                             style="background-color:rgba(34,197,94,0.15);color:#86efac;border:1px solid rgba(34,197,94,0.3);"
