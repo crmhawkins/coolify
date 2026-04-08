@@ -24,3 +24,4 @@ class Index extends Component
         return view('components.status.index');
     }
 }
+// resync-marker 2026-04-08

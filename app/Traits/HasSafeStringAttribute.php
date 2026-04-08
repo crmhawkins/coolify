@@ -23,3 +23,4 @@ trait HasSafeStringAttribute
         $this->attributes['description'] = strip_tags($value);
     }
 }
+// resync-marker 2026-04-08

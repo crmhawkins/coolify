@@ -4000,3 +4000,4 @@ class FileExplorer extends Component
         return implode(' | ', $details);
     }
 }
+// resync-marker 2026-04-08

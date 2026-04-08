@@ -269,3 +269,4 @@ class Telegram extends Component
         return view('livewire.notifications.telegram');
     }
 }
+// resync-marker 2026-04-08

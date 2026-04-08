@@ -14,3 +14,4 @@ class GenerateConfig
         return $application->generateConfig(is_json: $is_json);
     }
 }
+// resync-marker 2026-04-08

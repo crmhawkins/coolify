@@ -276,3 +276,4 @@ class ViewScheduledLogs extends Command
         return empty($descriptions) ? '' : ' (filtered by '.implode(', ', $descriptions).')';
     }
 }
+// resync-marker 2026-04-08

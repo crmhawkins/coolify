@@ -31,3 +31,4 @@ class CloudInitScript extends Model
         return self::whereTeamId(currentTeam()->id)->select($selectArray->all());
     }
 }
+// resync-marker 2026-04-08

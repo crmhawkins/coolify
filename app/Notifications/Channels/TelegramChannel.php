@@ -46,3 +46,4 @@ class TelegramChannel
         SendMessageToTelegramJob::dispatch($message, $buttons, $telegramToken, $chatId, $threadId);
     }
 }
+// resync-marker 2026-04-08

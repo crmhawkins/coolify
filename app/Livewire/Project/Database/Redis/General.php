@@ -309,3 +309,4 @@ class General extends Component
         return $this->database->runtime_environment_variables()->where('key', $name)->where('is_shared', true)->exists();
     }
 }
+// resync-marker 2026-04-08

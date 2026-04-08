@@ -20,3 +20,4 @@ interface Notification
 
     public function toTelegram();
 }
+// resync-marker 2026-04-08

@@ -94,3 +94,4 @@ class ValidGitBranch implements ValidationRule
         }
     }
 }
+// resync-marker 2026-04-08

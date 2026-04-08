@@ -45,3 +45,4 @@ class ConfigurationChecker extends Component
         $this->isConfigurationChanged = $this->resource->isConfigurationChanged();
     }
 }
+// resync-marker 2026-04-08

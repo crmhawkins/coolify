@@ -391,3 +391,4 @@ class ResourceOperations extends Component
         return view('livewire.project.shared.resource-operations');
     }
 }
+// resync-marker 2026-04-08

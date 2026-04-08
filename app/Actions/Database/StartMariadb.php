@@ -352,3 +352,4 @@ class StartMariadb
         $this->commands[] = "echo '{$content_base64}' | base64 -d | tee $this->configuration_dir/{$filename} > /dev/null";
     }
 }
+// resync-marker 2026-04-08

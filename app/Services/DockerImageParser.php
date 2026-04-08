@@ -124,3 +124,4 @@ class DockerImageParser
         return implode('/', $parts).':'.$this->tag;
     }
 }
+// resync-marker 2026-04-08

@@ -81,3 +81,4 @@ class ClearGlobalSearchCache extends Command
         return Command::SUCCESS;
     }
 }
+// resync-marker 2026-04-08

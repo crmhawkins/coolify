@@ -143,3 +143,4 @@ class SettingsOauth extends Component
         $this->dispatch('success', 'Instance settings updated successfully!');
     }
 }
+// resync-marker 2026-04-08

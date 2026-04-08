@@ -423,3 +423,4 @@ class CleanupRedis extends Command
         return $cleanedCount;
     }
 }
+// resync-marker 2026-04-08

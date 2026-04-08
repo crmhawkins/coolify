@@ -64,3 +64,4 @@ class CloudflareTunnelChangedNotification
         CloudflareTunnelConfigured::dispatch($teamId);
     }
 }
+// resync-marker 2026-04-08

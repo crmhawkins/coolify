@@ -190,3 +190,4 @@ class ConfigurationGenerator
         return Yaml::dump($this->config, 6, 2);
     }
 }
+// resync-marker 2026-04-08

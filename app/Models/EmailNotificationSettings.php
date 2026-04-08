@@ -77,3 +77,4 @@ class EmailNotificationSettings extends Model
         return $this->smtp_enabled || $this->resend_enabled || $this->use_instance_email_settings;
     }
 }
+// resync-marker 2026-04-08

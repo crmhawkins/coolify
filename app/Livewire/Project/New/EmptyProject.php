@@ -19,3 +19,4 @@ class EmptyProject extends Component
         return redirectRoute($this, 'project.show', ['project_uuid' => $project->uuid, 'environment_uuid' => $project->environments->first()->uuid]);
     }
 }
+// resync-marker 2026-04-08

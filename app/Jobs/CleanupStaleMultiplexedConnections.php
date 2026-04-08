@@ -80,3 +80,4 @@ class CleanupStaleMultiplexedConnections implements ShouldQueue
         Storage::disk('ssh-mux')->delete($muxFile);
     }
 }
+// resync-marker 2026-04-08

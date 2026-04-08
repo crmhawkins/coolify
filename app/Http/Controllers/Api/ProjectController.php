@@ -727,3 +727,4 @@ class ProjectController extends Controller
         return response()->json(['message' => 'Environment deleted.']);
     }
 }
+// resync-marker 2026-04-08

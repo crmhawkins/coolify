@@ -115,3 +115,4 @@ class ApplicationPullRequestUpdateJob implements ShouldBeEncrypted, ShouldQueue
         return $this->preview->fqdn ? "[Open Preview]({$this->preview->fqdn}) | " : '';
     }
 }
+// resync-marker 2026-04-08

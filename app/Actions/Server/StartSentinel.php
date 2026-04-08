@@ -69,3 +69,4 @@ class StartSentinel
         SentinelRestarted::dispatch($server, $version);
     }
 }
+// resync-marker 2026-04-08

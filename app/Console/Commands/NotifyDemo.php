@@ -76,3 +76,4 @@ class NotifyDemo extends Command
         HTML, ['email', 'discord', 'telegram', 'slack', 'pushover']);
     }
 }
+// resync-marker 2026-04-08

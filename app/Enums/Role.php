@@ -35,3 +35,4 @@ enum Role: string
         return $this->rank() > $role->rank();
     }
 }
+// resync-marker 2026-04-08

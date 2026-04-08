@@ -346,3 +346,4 @@ class StartMongodb
         $this->commands[] = "echo '{$content_base64}' | base64 -d | tee $this->configuration_dir/docker-entrypoint-initdb.d/01-default-database.js > /dev/null";
     }
 }
+// resync-marker 2026-04-08

@@ -86,3 +86,4 @@ class ComplexStatusCheck
         return $aggregator->aggregateFromContainers($relevantContainers);
     }
 }
+// resync-marker 2026-04-08

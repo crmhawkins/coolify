@@ -68,3 +68,4 @@ class DiscordNotificationSettings extends Model
         return $this->discord_ping_enabled;
     }
 }
+// resync-marker 2026-04-08

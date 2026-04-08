@@ -88,3 +88,4 @@ class Terminal extends Component
         return view('livewire.project.shared.terminal');
     }
 }
+// resync-marker 2026-04-08

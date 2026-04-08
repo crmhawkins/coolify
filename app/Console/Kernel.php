@@ -118,3 +118,4 @@ class Kernel extends ConsoleKernel
         require base_path('routes/console.php');
     }
 }
+// resync-marker 2026-04-08

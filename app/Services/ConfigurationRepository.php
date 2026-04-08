@@ -54,3 +54,4 @@ class ConfigurationRepository
         $this->config->set('constants.ssh.mux_enabled', false);
     }
 }
+// resync-marker 2026-04-08

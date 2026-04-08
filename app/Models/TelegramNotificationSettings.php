@@ -91,3 +91,4 @@ class TelegramNotificationSettings extends Model
         return $this->telegram_enabled;
     }
 }
+// resync-marker 2026-04-08

@@ -57,3 +57,4 @@ class DynamicConfigurationNavbar extends Component
         return view('livewire.server.proxy.dynamic-configuration-navbar');
     }
 }
+// resync-marker 2026-04-08

@@ -11,3 +11,4 @@ class Index extends Component
         return view('livewire.shared-variables.index');
     }
 }
+// resync-marker 2026-04-08

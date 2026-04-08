@@ -219,3 +219,4 @@ trait EnvironmentVariableAnalyzer
         return $result;
     }
 }
+// resync-marker 2026-04-08

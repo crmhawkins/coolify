@@ -87,3 +87,4 @@ class Member extends Component
         return $this->member->teams()->where('teams.id', currentTeam()->id)->first()?->pivot?->role;
     }
 }
+// resync-marker 2026-04-08

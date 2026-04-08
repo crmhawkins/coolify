@@ -488,3 +488,4 @@ class Index extends Component
         return view('livewire.boarding.index')->layout('layouts.boarding');
     }
 }
+// resync-marker 2026-04-08

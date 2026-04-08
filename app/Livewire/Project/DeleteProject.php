@@ -55,3 +55,4 @@ class DeleteProject extends Component
         return redirectRoute($this, 'project.index');
     }
 }
+// resync-marker 2026-04-08

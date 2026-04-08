@@ -77,3 +77,4 @@ class Kernel extends HttpKernel
         'restrict.client' => \App\Http\Middleware\RestrictClientAccess::class,
     ];
 }
+// resync-marker 2026-04-08

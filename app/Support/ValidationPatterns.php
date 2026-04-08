@@ -89,3 +89,4 @@ class ValidationPatterns
         return array_merge(self::nameMessages(), self::descriptionMessages());
     }
 }
+// resync-marker 2026-04-08

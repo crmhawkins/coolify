@@ -96,3 +96,4 @@ trait HasNotificationSettings
         return $channels;
     }
 }
+// resync-marker 2026-04-08

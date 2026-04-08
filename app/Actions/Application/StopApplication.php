@@ -66,3 +66,4 @@ class StopApplication
         ServiceStatusChanged::dispatch($application->environment->project->team->id);
     }
 }
+// resync-marker 2026-04-08

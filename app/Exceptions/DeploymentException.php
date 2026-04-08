@@ -30,3 +30,4 @@ class DeploymentException extends Exception
         return new static($exception->getMessage(), $exception->getCode(), $exception);
     }
 }
+// resync-marker 2026-04-08

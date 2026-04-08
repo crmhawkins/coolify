@@ -231,3 +231,4 @@ class ValidateAndInstall extends Component
         return view('livewire.server.validate-and-install');
     }
 }
+// resync-marker 2026-04-08

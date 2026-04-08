@@ -49,3 +49,4 @@ class ApplicationSetting extends Model
         return $this->belongsTo(Application::class);
     }
 }
+// resync-marker 2026-04-08

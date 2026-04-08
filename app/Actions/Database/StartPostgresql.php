@@ -331,3 +331,4 @@ class StartPostgresql
         $this->commands[] = "echo '{$content_base64}' | base64 -d | tee $config_file_path > /dev/null";
     }
 }
+// resync-marker 2026-04-08

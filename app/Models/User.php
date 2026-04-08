@@ -515,3 +515,4 @@ class User extends Authenticatable implements SendsEmail
         return $this->belongsToMany(Project::class, 'project_user')->withTimestamps();
     }
 }
+// resync-marker 2026-04-08

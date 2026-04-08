@@ -212,3 +212,4 @@ class CleanupNames extends Command
         return strlen($text) > $length ? substr($text, 0, $length).'...' : $text;
     }
 }
+// resync-marker 2026-04-08

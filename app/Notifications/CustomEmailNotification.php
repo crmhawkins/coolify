@@ -16,3 +16,4 @@ class CustomEmailNotification extends Notification implements ShouldQueue
 
     public $maxExceptions = 5;
 }
+// resync-marker 2026-04-08

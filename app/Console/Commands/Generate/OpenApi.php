@@ -37,3 +37,4 @@ class OpenApi extends Command
         echo "Converted OpenAPI YAML to JSON.\n";
     }
 }
+// resync-marker 2026-04-08

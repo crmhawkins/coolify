@@ -72,3 +72,4 @@ trait HasMetrics
         return "{$base}/container/{$this->uuid}/{$type}/history?from={$from}";
     }
 }
+// resync-marker 2026-04-08

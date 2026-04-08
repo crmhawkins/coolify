@@ -1508,3 +1508,4 @@ class GlobalSearch extends Component
         return view('livewire.global-search');
     }
 }
+// resync-marker 2026-04-08

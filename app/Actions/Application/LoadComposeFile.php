@@ -14,3 +14,4 @@ class LoadComposeFile
         $application->loadComposeFile();
     }
 }
+// resync-marker 2026-04-08

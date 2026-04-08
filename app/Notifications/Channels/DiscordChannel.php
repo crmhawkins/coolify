@@ -27,3 +27,4 @@ class DiscordChannel
         SendMessageToDiscordJob::dispatch($message, $discordSettings->discord_webhook_url);
     }
 }
+// resync-marker 2026-04-08

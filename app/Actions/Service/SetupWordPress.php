@@ -337,3 +337,4 @@ class SetupWordPress implements ShouldQueue
         }
     }
 }
+// resync-marker 2026-04-08

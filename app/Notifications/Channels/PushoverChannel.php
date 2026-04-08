@@ -19,3 +19,4 @@ class PushoverChannel
         SendMessageToPushoverJob::dispatch($message, $pushoverSettings->pushover_api_token, $pushoverSettings->pushover_user_key);
     }
 }
+// resync-marker 2026-04-08

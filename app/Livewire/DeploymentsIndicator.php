@@ -54,3 +54,4 @@ class DeploymentsIndicator extends Component
         return view('livewire.deployments-indicator');
     }
 }
+// resync-marker 2026-04-08

@@ -321,3 +321,4 @@ class Team extends Model implements SendsDiscord, SendsEmail, SendsPushover, Sen
         return $this->hasOne(WebhookNotificationSettings::class);
     }
 }
+// resync-marker 2026-04-08

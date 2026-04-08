@@ -260,3 +260,4 @@ class ScheduledTaskJob implements ShouldQueue
         $this->team?->notify(new TaskFailed($this->task, $exception?->getMessage() ?? 'Unknown error'));
     }
 }
+// resync-marker 2026-04-08

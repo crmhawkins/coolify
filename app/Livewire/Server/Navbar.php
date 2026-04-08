@@ -224,3 +224,4 @@ class Navbar extends Component
         return view('livewire.server.navbar');
     }
 }
+// resync-marker 2026-04-08

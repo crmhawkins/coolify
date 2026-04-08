@@ -50,3 +50,4 @@ class CloudInitScripts extends Component
         return view('livewire.security.cloud-init-scripts');
     }
 }
+// resync-marker 2026-04-08

@@ -63,3 +63,4 @@ class PushoverNotificationSettings extends Model
         return $this->pushover_enabled;
     }
 }
+// resync-marker 2026-04-08

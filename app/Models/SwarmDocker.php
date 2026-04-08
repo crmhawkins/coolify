@@ -102,3 +102,4 @@ class SwarmDocker extends BaseModel
         return $this->applications?->count() > 0 || $this->databases()->count() > 0;
     }
 }
+// resync-marker 2026-04-08

@@ -76,3 +76,4 @@ class TerminalAccess extends Component
         return view('livewire.server.security.terminal-access');
     }
 }
+// resync-marker 2026-04-08

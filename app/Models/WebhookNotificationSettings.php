@@ -66,3 +66,4 @@ class WebhookNotificationSettings extends Model
         return $this->webhook_enabled;
     }
 }
+// resync-marker 2026-04-08

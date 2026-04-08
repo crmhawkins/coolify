@@ -25,3 +25,4 @@ class VerifyEmail extends Component
         return view('livewire.verify-email');
     }
 }
+// resync-marker 2026-04-08

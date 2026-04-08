@@ -71,3 +71,4 @@ class Configuration extends Component
         return view('livewire.project.database.configuration');
     }
 }
+// resync-marker 2026-04-08

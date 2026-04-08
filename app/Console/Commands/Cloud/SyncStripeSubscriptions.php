@@ -79,3 +79,4 @@ class SyncStripeSubscriptions extends Command
         return 0;
     }
 }
+// resync-marker 2026-04-08

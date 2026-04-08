@@ -15,3 +15,4 @@ class RunCommand
         return remote_process(command: [$command], server: $server, ignore_errors: true, type: ActivityTypes::COMMAND->value);
     }
 }
+// resync-marker 2026-04-08

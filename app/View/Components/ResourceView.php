@@ -26,3 +26,4 @@ class ResourceView extends Component
         return view('components.resource-view');
     }
 }
+// resync-marker 2026-04-08

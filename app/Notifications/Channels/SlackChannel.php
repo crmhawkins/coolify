@@ -22,3 +22,4 @@ class SlackChannel
         SendMessageToSlackJob::dispatch($message, $slackSettings->slack_webhook_url);
     }
 }
+// resync-marker 2026-04-08

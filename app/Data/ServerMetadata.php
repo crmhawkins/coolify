@@ -15,3 +15,4 @@ class ServerMetadata extends Data
         public ?string $last_applied_settings = null
     ) {}
 }
+// resync-marker 2026-04-08

@@ -62,3 +62,4 @@ class InstallPrerequisites
         return remote_process($command, $server);
     }
 }
+// resync-marker 2026-04-08

@@ -459,3 +459,4 @@ class LaravelManager extends Component
         return view('livewire.project.service.laravel-manager');
     }
 }
+// resync-marker 2026-04-08

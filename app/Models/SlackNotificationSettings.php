@@ -61,3 +61,4 @@ class SlackNotificationSettings extends Model
         return $this->slack_enabled;
     }
 }
+// resync-marker 2026-04-08

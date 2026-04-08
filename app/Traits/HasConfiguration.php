@@ -40,3 +40,4 @@ trait HasConfiguration
         return (new ConfigurationGenerator($this))->toArray();
     }
 }
+// resync-marker 2026-04-08

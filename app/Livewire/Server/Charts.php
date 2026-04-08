@@ -62,3 +62,4 @@ class Charts extends Component
         $this->loadData();
     }
 }
+// resync-marker 2026-04-08

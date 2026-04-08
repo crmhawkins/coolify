@@ -17,3 +17,4 @@ interface CustomJobRepositoryInterface extends JobRepository
      */
     public function countJobsByStatus(string $status): int;
 }
+// resync-marker 2026-04-08

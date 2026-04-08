@@ -15,3 +15,4 @@ class StopSentinel
         $server->sentinelHeartbeat(isReset: true);
     }
 }
+// resync-marker 2026-04-08

@@ -66,3 +66,4 @@ class ResourcesController extends Controller
         return response()->json(serializeApiResponse($resources));
     }
 }
+// resync-marker 2026-04-08

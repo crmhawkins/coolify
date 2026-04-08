@@ -97,3 +97,4 @@ class TeamPolicy
         return $user->isAdmin() || $user->isOwner();
     }
 }
+// resync-marker 2026-04-08

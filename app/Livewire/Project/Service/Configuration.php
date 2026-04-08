@@ -175,3 +175,4 @@ class Configuration extends Component
                 && str_contains($composeRaw, 'phpmyadmin'));
     }
 }
+// resync-marker 2026-04-08

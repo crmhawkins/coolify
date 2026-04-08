@@ -275,3 +275,4 @@ class Emails extends Command
         $this->info("Email sent to $this->email successfully. 📧");
     }
 }
+// resync-marker 2026-04-08
