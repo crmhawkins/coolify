@@ -62,7 +62,7 @@
                                      the text is always readable regardless of
                                      what theme Coolify thinks it is in. --}}
                                 <div
-                                    class="absolute z-30 left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-[420px] overflow-auto"
+                                    class="absolute z-30 left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-[40rem] overflow-auto"
                                     style="background-color:#ffffff;color:#0b1220;"
                                 >
                                     @foreach ($filteredArtisanCommands as $cmd)
