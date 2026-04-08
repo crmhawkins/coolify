@@ -183,16 +183,25 @@ class LaravelCron extends Component
             }
             $supervisorStatus = trim(instant_remote_process([$supervisorCommand], $server, false) ?? '');
 
+            // "notfound" is our own sentinel for "supervisorctl binary is
+            // missing in the container" — never leak it to the UI. Collapse
+            // it to an empty string so the fallback phrasing kicks in.
+            if ($supervisorStatus === 'notfound') {
+                $supervisorStatus = '';
+            }
+
             if ($processCheck !== 'notfound' || str_contains($supervisorStatus, 'RUNNING')) {
                 $this->isSchedulerEnabled = true;
                 $this->schedulerStatus = 'Running';
-                $this->schedulerOutput = $supervisorStatus ?: 'Scheduler process is running';
+                $this->schedulerOutput = $supervisorStatus !== ''
+                    ? $supervisorStatus
+                    : '';
             } else {
                 $this->isSchedulerEnabled = false;
                 $this->schedulerStatus = 'Stopped';
-                $this->schedulerOutput = $supervisorStatus !== '' && $supervisorStatus !== 'notfound'
+                $this->schedulerOutput = $supervisorStatus !== ''
                     ? $supervisorStatus
-                    : 'Scheduler is not running';
+                    : '';
             }
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Error checking scheduler status: '.$e->getMessage());
