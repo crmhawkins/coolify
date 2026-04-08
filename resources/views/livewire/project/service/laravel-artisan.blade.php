@@ -54,35 +54,36 @@
                             />
 
                             @if (! empty($filteredArtisanCommands))
-                                {{-- Suggestions dropdown: inline styles win
-                                     over any cascade fight the Coolify
-                                     theme might put up. max-height is
-                                     pinned via inline style AND a Tailwind
-                                     arbitrary so whichever the live CSS
-                                     compiles first, the dropdown still gets
-                                     enough room for all 10 popular
-                                     commands without forcing the user to
-                                     scroll. Padding is tightened from py-2
-                                     to py-1.5 to keep each row compact. --}}
+                                {{-- Suggestions dropdown: dark theme matching
+                                     the rest of Coolify. Background is a
+                                     near-black #18181b, command names are
+                                     white, descriptions are a muted grey.
+                                     Hover switches to a slightly lighter
+                                     #27272a so the row under the cursor
+                                     stands out. Padding stays tight at
+                                     py-1.5 so all 10 popular commands fit
+                                     in one compact drop without scroll. --}}
                                 <div
-                                    class="absolute z-30 left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg overflow-auto"
-                                    style="background-color:#ffffff;color:#0b1220;max-height:80vh;"
+                                    class="absolute z-30 left-0 right-0 mt-1 border rounded shadow-lg overflow-auto"
+                                    style="background-color:#18181b;border-color:#3f3f46;color:#e4e4e7;max-height:80vh;"
                                 >
                                     @foreach ($filteredArtisanCommands as $cmd)
                                         <button
                                             type="button"
-                                            class="w-full px-3 py-1.5 hover:bg-gray-100 flex items-center gap-2 text-left"
-                                            style="color:#0b1220;background-color:#ffffff;"
+                                            class="w-full px-3 py-1.5 flex items-center gap-2 text-left transition-colors"
+                                            style="color:#e4e4e7;background-color:#18181b;"
+                                            onmouseover="this.style.backgroundColor='#27272a'"
+                                            onmouseout="this.style.backgroundColor='#18181b'"
                                             wire:click="selectCommand(@js($cmd['name']))"
                                         >
                                             <span
                                                 class="font-mono text-sm whitespace-nowrap min-w-[140px]"
-                                                style="color:#0b1220;"
+                                                style="color:#ffffff;"
                                             >{{ $cmd['name'] }}</span>
                                             @if (! empty($cmd['description']))
                                                 <span
                                                     class="text-xs truncate"
-                                                    style="color:#374151;"
+                                                    style="color:#a1a1aa;"
                                                     title="{{ $cmd['description'] }}"
                                                 >
                                                     — {{ $cmd['description'] }}
@@ -95,62 +96,64 @@
                         </div>
 
                         <div class="shrink-0">
-                            <x-forms.button
+                            <button
+                                type="button"
                                 wire:click="run"
                                 wire:loading.attr="disabled"
                                 wire:target="run"
-                                class="bg-coollabs h-10 px-4"
+                                class="h-10 px-4 rounded font-semibold text-sm transition-all"
+                                style="background-color:#8b5cf6;color:#ffffff;box-shadow:0 1px 3px rgba(139,92,246,0.4);"
+                                onmouseover="this.style.backgroundColor='#7c3aed'"
+                                onmouseout="this.style.backgroundColor='#8b5cf6'"
                             >
                                 <span wire:loading.remove wire:target="run">Ejecutar</span>
                                 <span wire:loading wire:target="run">Ejecutando…</span>
-                            </x-forms.button>
+                            </button>
                         </div>
                     </div>
 
-                    <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    <div class="mt-1 text-xs" style="color:#a1a1aa;">
                         Se ejecuta como:
-                        <span class="font-mono">{{ 'php /var/www/html/artisan '.trim((string) $selectedCommand) }}</span>
+                        <span class="font-mono" style="color:#c4b5fd;">{{ 'php /var/www/html/artisan '.trim((string) $selectedCommand) }}</span>
                     </div>
 
                     @if (! empty($selectedCommandDescription))
-                        <div class="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
-                            <span class="font-semibold">Descripción:</span>
+                        <div class="mt-2 text-xs" style="color:#a1a1aa;">
+                            <span class="font-semibold" style="color:#e4e4e7;">Descripción:</span>
                             {{ $selectedCommandDescription }}
                         </div>
                     @endif
                 </div>
 
                 {{-- OUTPUT ROW: always full width, always visible, sits
-                     directly below the command row. Never, under any
-                     circumstances, on the right side of the button. --}}
+                     directly below the command row. Dark theme to match
+                     the rest of Coolify — near-black background, light
+                     grey text, purple accent on the Limpiar action. --}}
                 <div class="w-full">
                     <div class="flex items-center justify-between mb-2">
-                        <label class="block text-sm font-medium dark:text-white">Salida:</label>
+                        <label class="block text-sm font-medium" style="color:#e4e4e7;">Salida:</label>
                         @if (! empty($output))
                             <button
                                 type="button"
                                 wire:click="$set('output', '')"
-                                class="text-xs text-neutral-500 dark:text-neutral-400 hover:underline"
+                                class="text-xs hover:underline transition-colors"
+                                style="color:#c4b5fd;"
                             >
                                 Limpiar
                             </button>
                         @endif
                     </div>
                     @if ($output === '')
-                        <div class="w-full rounded border border-dashed border-coolgray-300 dark:border-coolgray-600 px-4 py-10 text-center text-sm text-neutral-500 dark:text-neutral-400 min-h-[20rem] flex items-center justify-center">
+                        <div
+                            class="w-full rounded border border-dashed px-4 py-10 text-center text-sm min-h-[20rem] flex items-center justify-center"
+                            style="background-color:#18181b;border-color:#3f3f46;color:#71717a;"
+                        >
                             La salida del comando aparecerá aquí después de ejecutarlo.
                         </div>
                     @else
-                        {{-- Same fix as the suggestions dropdown: the live
-                             container has a white background for this <pre>
-                             regardless of the dark theme, but
-                             `dark:text-gray-100` wins and paints the text
-                             light-grey on white (invisible). Inline styles
-                             pin both the background and the text colour so
-                             the output is always readable on any theme. --}}
                         <pre
-                            class="w-full whitespace-pre-wrap break-words border border-gray-300 px-4 py-3 rounded text-sm font-mono min-h-[20rem] max-h-[70vh] overflow-auto"
-                            style="background-color:#ffffff;color:#0b1220;"
+                            class="w-full whitespace-pre-wrap break-words border px-4 py-3 rounded text-sm font-mono min-h-[20rem] max-h-[70vh] overflow-auto"
+                            style="background-color:#0a0a0a;color:#e4e4e7;border-color:#27272a;"
                         >{{ $output }}</pre>
                     @endif
                 </div>

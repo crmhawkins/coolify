@@ -32,20 +32,20 @@
                 <div class="flex items-center gap-3">
                     @if ($schedulerStatus === 'Running')
                         <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-                              style="background-color:#dcfce7;color:#166534;">
-                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#16a34a;"></span>
+                              style="background-color:rgba(34,197,94,0.15);color:#86efac;border:1px solid rgba(34,197,94,0.3);">
+                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#22c55e;"></span>
                             Scheduler activo
                         </span>
                     @elseif ($schedulerStatus === 'Stopped')
                         <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-                              style="background-color:#fee2e2;color:#991b1b;">
-                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#dc2626;"></span>
+                              style="background-color:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.3);">
+                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#ef4444;"></span>
                             Scheduler detenido
                         </span>
                     @else
                         <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-                              style="background-color:#fef3c7;color:#92400e;">
-                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#d97706;"></span>
+                              style="background-color:rgba(245,158,11,0.15);color:#fcd34d;border:1px solid rgba(245,158,11,0.3);">
+                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#f59e0b;"></span>
                             Estado desconocido
                         </span>
                     @endif
@@ -81,20 +81,28 @@
 
                     {{-- Card grid: 1 column on mobile, 2 on md+, stays
                          readable and compact even when there are 15-20
-                         tasks like in the Apartamentos project. --}}
+                         tasks like in the Apartamentos project.
+
+                         Palette: dark background (#18181b) to match the
+                         rest of Coolify's dark theme, with near-white
+                         text for the command name, purple accents on
+                         the "Ejecutar" button and on the "Próxima"
+                         badge, and translucent color swatches for the
+                         other metadata. All colors are inlined so the
+                         Coolify dark-mode cascade cannot hijack them. --}}
                     <div class="grid gap-3 md:grid-cols-2">
                         @foreach ($scheduledTasks as $taskIndex => $task)
                             <div
-                                class="rounded-lg border shadow-sm"
-                                style="background-color:#ffffff;border-color:#e5e7eb;color:#0b1220;"
+                                class="rounded-lg border shadow-lg"
+                                style="background-color:#18181b;border-color:#27272a;color:#e4e4e7;"
                             >
                                 {{-- Card header: command name + run button --}}
                                 <div class="flex items-start justify-between gap-3 px-4 pt-3">
                                     <div class="flex items-center gap-2 min-w-0">
-                                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#0b1220;">
+                                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#a1a1aa;">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
                                         </svg>
-                                        <span class="font-mono text-sm font-semibold truncate" style="color:#0b1220;" title="{{ $task['command'] }}">
+                                        <span class="font-mono text-sm font-semibold truncate" style="color:#ffffff;" title="{{ $task['command'] }}">
                                             {{ $task['command'] ?: '—' }}
                                         </span>
                                     </div>
@@ -103,8 +111,10 @@
                                         wire:click="executeTaskNow({{ $taskIndex }})"
                                         wire:loading.attr="disabled"
                                         wire:target="executeTaskNow({{ $taskIndex }})"
-                                        class="shrink-0 rounded px-2.5 py-1 text-xs font-semibold transition-opacity hover:opacity-80"
-                                        style="background-color:#0b1220;color:#ffffff;"
+                                        class="shrink-0 rounded px-2.5 py-1 text-xs font-semibold transition-all hover:opacity-90"
+                                        style="background-color:#8b5cf6;color:#ffffff;box-shadow:0 1px 3px rgba(139,92,246,0.4);"
+                                        onmouseover="this.style.backgroundColor='#7c3aed'"
+                                        onmouseout="this.style.backgroundColor='#8b5cf6'"
                                     >
                                         <span wire:loading.remove wire:target="executeTaskNow({{ $taskIndex }})">Ejecutar</span>
                                         <span wire:loading wire:target="executeTaskNow({{ $taskIndex }})">…</span>
@@ -115,7 +125,7 @@
                                 <div class="flex flex-wrap items-center gap-2 px-4 py-3">
                                     <span
                                         class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono"
-                                        style="background-color:#f3f4f6;color:#374151;"
+                                        style="background-color:#27272a;color:#e4e4e7;border:1px solid #3f3f46;"
                                         title="Expresión cron"
                                     >
                                         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -126,7 +136,7 @@
                                     @if (! empty($task['next_due']))
                                         <span
                                             class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs"
-                                            style="background-color:#dbeafe;color:#1e40af;"
+                                            style="background-color:rgba(139,92,246,0.15);color:#c4b5fd;border:1px solid rgba(139,92,246,0.3);"
                                             title="Próxima ejecución"
                                         >
                                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -138,7 +148,7 @@
                                     @if (! empty($task['last_run']))
                                         <span
                                             class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs"
-                                            style="background-color:#ecfccb;color:#3f6212;"
+                                            style="background-color:rgba(34,197,94,0.15);color:#86efac;border:1px solid rgba(34,197,94,0.3);"
                                             title="Última ejecución"
                                         >
                                             Última: {{ $task['last_run'] }}
@@ -150,7 +160,7 @@
                                 @if (! empty($task['description']))
                                     <div
                                         class="border-t px-4 py-2 text-xs font-mono truncate"
-                                        style="border-color:#e5e7eb;color:#6b7280;"
+                                        style="border-color:#27272a;color:#71717a;"
                                         title="{{ $task['description'] }}"
                                     >
                                         {{ $task['description'] }}
@@ -165,10 +175,10 @@
                      something, or the source-level fallback has a message --}}
                 @if (! empty($schedulerOutput))
                     <div class="w-full">
-                        <div class="mb-2 text-sm font-medium dark:text-white">Salida:</div>
+                        <div class="mb-2 text-sm font-medium" style="color:#e4e4e7;">Salida:</div>
                         <pre
                             class="w-full whitespace-pre-wrap break-words border rounded px-4 py-3 text-sm font-mono min-h-[8rem] max-h-[40vh] overflow-auto"
-                            style="background-color:#ffffff;color:#0b1220;border-color:#e5e7eb;"
+                            style="background-color:#0a0a0a;color:#e4e4e7;border-color:#27272a;"
                         >{{ $schedulerOutput }}</pre>
                     </div>
                 @endif
