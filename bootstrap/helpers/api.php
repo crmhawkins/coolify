@@ -190,3 +190,4 @@ function removeUnnecessaryFieldsFromRequest(Request $request)
     $request->offsetUnset('is_container_label_escape_enabled');
     $request->offsetUnset('docker_compose_raw');
 }
+// resync-marker 2026-04-08

@@ -40,3 +40,4 @@ function calculateDuration($startDate, $endDate = null)
         return $interval->format('%Im %Ss');
     }
 }
+// resync-marker 2026-04-08

@@ -7,3 +7,4 @@ If you have any questions, please contact the team owner.<br><br>
 
 If it was not you who requested this invitation, please ignore this email.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

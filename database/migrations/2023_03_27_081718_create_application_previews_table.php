@@ -34,3 +34,4 @@ return new class extends Migration
         Schema::dropIfExists('application_previews');
     }
 };
+// resync-marker 2026-04-08

@@ -6,3 +6,4 @@
     <div class="subtitle">Here you can see and manage your subscription.</div>
     <livewire:subscription.actions />
 </div>
+{{-- resync-marker 2026-04-08 --}}

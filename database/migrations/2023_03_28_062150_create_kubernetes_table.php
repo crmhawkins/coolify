@@ -27,3 +27,4 @@ return new class extends Migration
         Schema::dropIfExists('kubernetes');
     }
 };
+// resync-marker 2026-04-08

@@ -203,3 +203,4 @@ return [
         Watchers\ViewWatcher::class => env('TELESCOPE_VIEW_WATCHER', true),
     ],
 ];
+// resync-marker 2026-04-08

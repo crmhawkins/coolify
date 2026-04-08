@@ -25,3 +25,4 @@ class CreateActivityLogTable extends Migration
         Schema::connection(config('activitylog.database_connection'))->dropIfExists(config('activitylog.table_name'));
     }
 }
+// resync-marker 2026-04-08

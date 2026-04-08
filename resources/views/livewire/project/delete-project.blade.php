@@ -7,3 +7,4 @@
         shortConfirmationLabel="Project Name" confirmationText="{{ $projectName }}" :confirmWithPassword="false"
         step2ButtonText="Permanently Delete" />
 </div>
+{{-- resync-marker 2026-04-08 --}}

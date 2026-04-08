@@ -27,3 +27,4 @@ return new class extends Migration
         Schema::dropIfExists('project_settings');
     }
 };
+// resync-marker 2026-04-08

@@ -31,3 +31,4 @@ return new class extends Migration
         Schema::dropIfExists('cloud_init_scripts');
     }
 };
+// resync-marker 2026-04-08

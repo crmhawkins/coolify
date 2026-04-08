@@ -682,3 +682,4 @@
         transition: transform 0.2s ease;
     }
 </style>
+{{-- resync-marker 2026-04-08 --}}

@@ -29,3 +29,4 @@ return new class extends Migration
         Schema::dropIfExists('sessions');
     }
 };
+// resync-marker 2026-04-08

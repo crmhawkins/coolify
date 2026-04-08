@@ -75,3 +75,4 @@ function set_transanctional_email_settings($settings = null)
 
     return null;
 }
+// resync-marker 2026-04-08

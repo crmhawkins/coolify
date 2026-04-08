@@ -30,3 +30,4 @@ return new class extends Migration
         Schema::dropIfExists('failed_jobs');
     }
 };
+// resync-marker 2026-04-08

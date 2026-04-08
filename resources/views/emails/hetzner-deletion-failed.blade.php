@@ -11,3 +11,4 @@ The server has been removed from Coolify, but may still exist in your Hetzner Cl
 Please check your Hetzner Cloud console and manually delete the server if needed to avoid ongoing charges.
 
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

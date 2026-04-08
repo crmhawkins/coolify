@@ -10,3 +10,4 @@
         <x-forms.button isError wire:click="delete('{{ $fileName }}')">Delete</x-forms.button>
     @endcan
 </div>
+{{-- resync-marker 2026-04-08 --}}

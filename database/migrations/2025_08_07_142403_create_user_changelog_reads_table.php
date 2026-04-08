@@ -32,3 +32,4 @@ return new class extends Migration
         Schema::dropIfExists('user_changelog_reads');
     }
 };
+// resync-marker 2026-04-08

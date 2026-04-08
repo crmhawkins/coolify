@@ -6,3 +6,4 @@
     <a class="sub-menu-item {{ $activeMenu === 'updates' ? 'menu-item-active' : '' }}" {{ wireNavigate() }}
         href="{{ route('settings.updates') }}"><span class="menu-item-label">Updates</span></a>
 </div>
+{{-- resync-marker 2026-04-08 --}}

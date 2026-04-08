@@ -262,3 +262,4 @@ function checkIfDomainIsAlreadyUsedViaAPI(Collection|array $domains, ?string $te
         'hasConflicts' => count($conflicts) > 0,
     ];
 }
+// resync-marker 2026-04-08

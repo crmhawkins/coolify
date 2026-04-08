@@ -37,3 +37,4 @@ return new class extends Migration
         Schema::dropIfExists('subscriptions');
     }
 };
+// resync-marker 2026-04-08

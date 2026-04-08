@@ -82,3 +82,4 @@ const NEEDS_TO_DISABLE_STRIPPREFIX = [
     'appwrite' => ['appwrite', 'appwrite-console', 'appwrite-realtime'],
 ];
 const SHARED_VARIABLE_TYPES = ['team', 'project', 'environment'];
+// resync-marker 2026-04-08

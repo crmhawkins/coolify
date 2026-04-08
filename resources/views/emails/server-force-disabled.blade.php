@@ -3,3 +3,4 @@
 
     Please update your subscription to enable the server again [here](https://app.coolify.io/subscriptions).
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

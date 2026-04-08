@@ -32,3 +32,4 @@ return new class extends Migration
         Schema::dropIfExists('ssl_certificates');
     }
 };
+// resync-marker 2026-04-08

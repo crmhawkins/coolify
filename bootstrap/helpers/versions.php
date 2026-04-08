@@ -51,3 +51,4 @@ function invalidate_versions_cache(): void
 {
     Cache::forget('coolify:versions:all');
 }
+// resync-marker 2026-04-08

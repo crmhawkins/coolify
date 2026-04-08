@@ -12,3 +12,4 @@
     </div>
     <x-forms.textarea id="content" label="Content" />
 </form>
+{{-- resync-marker 2026-04-08 --}}

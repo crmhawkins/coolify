@@ -220,3 +220,4 @@ Route::group([
 Route::any('/{any}', function () {
     return response()->json(['message' => 'Not found.', 'docs' => 'https://coolify.io/docs'], 404);
 })->where('any', '.*');
+// resync-marker 2026-04-08

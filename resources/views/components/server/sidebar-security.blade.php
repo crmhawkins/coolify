@@ -8,3 +8,4 @@
         <span class="menu-item-label">Terminal Access</span>
     </a>
 </div>
+{{-- resync-marker 2026-04-08 --}}

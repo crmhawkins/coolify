@@ -110,3 +110,4 @@ return new class extends Migration
         // Cannot reverse trimming operation
     }
 };
+// resync-marker 2026-04-08

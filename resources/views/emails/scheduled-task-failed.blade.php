@@ -7,3 +7,4 @@ Scheduled task ({{ $task->name }}) was FAILED with the following error:
 
 Click [here]({{ $url }}) to view the task.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

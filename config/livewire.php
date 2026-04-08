@@ -148,3 +148,4 @@ return [
     'pagination_theme' => 'tailwind',
     'lazy_placeholder' => 'components.page-loading',
 ];
+// resync-marker 2026-04-08

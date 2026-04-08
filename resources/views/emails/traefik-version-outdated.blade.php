@@ -64,3 +64,4 @@ It is recommended to test the new Traefik version before switching it in product
 
 Click on any server name above to manage its proxy settings.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

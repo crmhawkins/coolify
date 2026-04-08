@@ -5,3 +5,4 @@
         shortConfirmationLabel="Environment Name" confirmationText="{{ $environmentName }}" :confirmWithPassword="false"
         step2ButtonText="Permanently Delete" />
 </div>
+{{-- resync-marker 2026-04-08 --}}

@@ -31,3 +31,4 @@ return new class extends Migration
         Schema::dropIfExists('oauth_settings');
     }
 };
+// resync-marker 2026-04-08

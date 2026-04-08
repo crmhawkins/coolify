@@ -3,3 +3,4 @@ Your trial ended. All automations and integrations are disabled for all of your 
 
 Please update payment details [here]({{ $stripeCustomerPortal }}) or in [Coolify Cloud](https://app.coolify.io) to continue using our services.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

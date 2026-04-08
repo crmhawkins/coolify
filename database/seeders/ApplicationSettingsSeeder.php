@@ -17,3 +17,4 @@ class ApplicationSettingsSeeder extends Seeder
         $application_1->settings->save();
     }
 }
+// resync-marker 2026-04-08

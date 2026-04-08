@@ -29,3 +29,4 @@ return new class extends Migration
         // Settings → Advanced if they want to reopen registration.
     }
 };
+// resync-marker 2026-04-08

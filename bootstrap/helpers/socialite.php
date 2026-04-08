@@ -81,3 +81,4 @@ function get_socialite_provider(string $provider)
 
     return $socialite;
 }
+// resync-marker 2026-04-08

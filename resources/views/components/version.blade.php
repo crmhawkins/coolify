@@ -2,3 +2,4 @@
     href="https://github.com/coollabsio/coolify/releases/tag/v{{ config('constants.coolify.version') }}" target="_blank">
     v{{ config('constants.coolify.version') }}
 </a>
+{{-- resync-marker 2026-04-08 --}}

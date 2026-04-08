@@ -3613,3 +3613,4 @@ function downsampleLTTB(array $data, int $threshold): array
 
     return $sampled;
 }
+// resync-marker 2026-04-08

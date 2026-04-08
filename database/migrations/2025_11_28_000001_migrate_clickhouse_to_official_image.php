@@ -67,3 +67,4 @@ return new class extends Migration
             ->update(['mount_path' => '/bitnami/clickhouse']);
     }
 };
+// resync-marker 2026-04-08

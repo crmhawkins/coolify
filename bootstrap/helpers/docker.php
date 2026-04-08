@@ -1481,3 +1481,4 @@ function injectDockerComposeBuildArgs(string $command, string $buildArgsString):
 
     return $modifiedCommand ?? $command;
 }
+// resync-marker 2026-04-08

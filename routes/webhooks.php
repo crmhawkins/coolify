@@ -19,3 +19,4 @@ Route::post('/source/bitbucket/events/manual', [Bitbucket::class, 'manual']);
 Route::post('/source/gitea/events/manual', [Gitea::class, 'manual']);
 
 Route::post('/payments/stripe/events', [Stripe::class, 'events']);
+// resync-marker 2026-04-08

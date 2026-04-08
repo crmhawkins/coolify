@@ -7,3 +7,4 @@ S3 Error: {{ $s3_error }}
 Check S3 Configuration: {{ $s3_storage_url }}
 @endif
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

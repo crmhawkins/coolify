@@ -709,3 +709,4 @@ export function initializeTerminalComponent() {
 
     window.Alpine.data('terminalData', terminalData);
 }
+// resync-marker 2026-04-08

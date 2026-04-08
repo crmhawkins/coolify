@@ -51,3 +51,4 @@ Your server is up to date! No packages require updating at this time.
 
 You can manage server patches in your [Coolify Dashboard]({{ $server_url }}).
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

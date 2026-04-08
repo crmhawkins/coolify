@@ -29,3 +29,4 @@ return new class extends Migration
         // No rollback needed - we're cleaning up corrupt data
     }
 };
+// resync-marker 2026-04-08

@@ -8,3 +8,4 @@ import { initializeTerminalComponent } from './terminal.js';
         }
     });
 });
+// resync-marker 2026-04-08

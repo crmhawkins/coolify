@@ -3,3 +3,4 @@ Your trial ends soon. Please update payment details [here]({{ $stripeCustomerPor
 
 Your servers & deployed resources will be untouched, but you won't be able to deploy new resources and lose all automations and integrations.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

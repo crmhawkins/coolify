@@ -6,3 +6,4 @@
 @endisset
 
 {!! strip_tags($footer) !!}
+{{-- resync-marker 2026-04-08 --}}

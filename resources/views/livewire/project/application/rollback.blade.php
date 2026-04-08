@@ -80,3 +80,4 @@
     </div>
     <div wire:target='loadImages' wire:loading>Loading available docker images...</div>
 </div>
+{{-- resync-marker 2026-04-08 --}}

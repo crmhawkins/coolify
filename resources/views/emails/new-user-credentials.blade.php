@@ -13,3 +13,4 @@ Por seguridad, te recomendamos cambiar la contraseña una vez hayas iniciado ses
 
 Si no esperabas este correo, ignóralo o contacta con el administrador.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

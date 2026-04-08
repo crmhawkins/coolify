@@ -49,3 +49,4 @@
             href="{{ route('server.delete', ['server_uuid' => $server->uuid]) }}"><span class="menu-item-label">Danger</span></a>
     @endif
 </div>
+{{-- resync-marker 2026-04-08 --}}

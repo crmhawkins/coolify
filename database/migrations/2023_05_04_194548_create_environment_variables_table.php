@@ -38,3 +38,4 @@ return new class extends Migration
         Schema::dropIfExists('environment_variables');
     }
 };
+// resync-marker 2026-04-08

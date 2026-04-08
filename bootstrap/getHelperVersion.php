@@ -8,3 +8,4 @@ function env()
 
 $version = include 'config/constants.php';
 echo $version['coolify']['helper_version'] ?: 'unknown';
+// resync-marker 2026-04-08

@@ -117,3 +117,4 @@ function updateStripeCustomerEmail(Team $team, string $newEmail): void
         ['email' => $newEmail]
     );
 }
+// resync-marker 2026-04-08

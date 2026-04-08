@@ -25,3 +25,4 @@
         </x-mail::footer>
     </x-slot:footer>
 </x-mail::layout>
+{{-- resync-marker 2026-04-08 --}}

@@ -5,3 +5,4 @@ Click [here]({{ $url }}) to reset your password.
 
 This link will expire in {{ $count }} minutes.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

@@ -5,3 +5,4 @@ You can try out Coolify, without payment information for free. If you like it, y
 
 [Click here](https://app.coolify.io/subscription/new) to start your trial.
 </x-emails.layout>
+{{-- resync-marker 2026-04-08 --}}

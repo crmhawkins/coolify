@@ -4,3 +4,4 @@
     </x-slot>
     <livewire:storage.form :storage="$storage" />
 </div>
+{{-- resync-marker 2026-04-08 --}}
