@@ -70,6 +70,7 @@
             <main class="lg:pl-56">
                 <div class="p-4 sm:px-6 lg:px-8 lg:py-6">
                     <div class="relative">
+                        @if (! auth()->user()->isClient())
                         <div class="absolute right-0 top-0 z-40">
                             <details class="relative group">
                                 <summary class="list-none cursor-pointer rounded bg-coollabs px-3 py-2 text-xs font-semibold text-white shadow-lg hover:opacity-90">
@@ -104,6 +105,7 @@
                                 </div>
                             </details>
                         </div>
+                        @endif
                         {{ $slot }}
                     </div>
                 </div>

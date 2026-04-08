@@ -44,9 +44,12 @@ class NewClientCredentials extends CustomEmailNotification
 
     public function toMail(object $notifiable): MailMessage
     {
+        // Subject is hardcoded in Spanish because this notification only ever
+        // goes to scoped clients managed by Hawkins; there is no
+        // multi-tenancy requirement to branch on locale or instance name.
         $subject = $this->isPasswordReset
-            ? 'Tu contraseña en '.$this->instanceName.' ha sido restablecida'
-            : 'Bienvenido a '.$this->instanceName;
+            ? 'Tu contraseña ha sido restablecida'
+            : 'Bienvenido — credenciales de acceso';
 
         $mail = new MailMessage;
         $mail->subject($subject);

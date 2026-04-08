@@ -86,7 +86,7 @@
             @endif
         </span>
     @endauth
-    @if (instanceSettings()->is_sponsorship_popup_enabled && !isCloud())
+    @if (instanceSettings()->is_sponsorship_popup_enabled && !isCloud() && ! auth()->user()?->isClient())
         <span x-show="popups.sponsorship">
             <x-popup>
                 <x-slot:customActions>

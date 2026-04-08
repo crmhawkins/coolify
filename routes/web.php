@@ -102,11 +102,19 @@ Route::get('/admin', AdminIndex::class)->name('admin.index')->middleware(['auth'
 
 Route::post('/forgot-password', [Controller::class, 'forgot_password'])->name('password.forgot')->middleware('throttle:forgot-password');
 
-// Friendly alias for scoped clients: /clientes and /acceso-clientes both
-// redirect to the standard login page. Lets admins share a clean URL
-// like https://interno.hawkins.es/clientes with their clients.
-Route::get('/clientes', fn () => redirect('/login'))->name('clientes.login');
-Route::get('/acceso-clientes', fn () => redirect('/login'));
+// White-labelled login page for scoped clients. It posts to the standard
+// Fortify /login endpoint so authentication flows are unchanged, but it
+// hides every Coolify-branded element (certificate upload, access key,
+// forgot password, registration notice) and shows only the client logo
+// plus an email/password pair. /acceso-clientes is an alias.
+Route::get('/clientes', function () {
+    if (auth()->check()) {
+        return redirect('/');
+    }
+
+    return view('auth.client-login');
+})->name('clientes.login')->middleware('guest');
+Route::get('/acceso-clientes', fn () => redirect(route('clientes.login')))->middleware('guest');
 
 Route::get('/realtime', [Controller::class, 'realtime_test'])->middleware('auth');
 Route::get('/verify', [Controller::class, 'verify'])->middleware('auth')->name('verify.email');
@@ -184,7 +192,15 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('/{user}/edit', UserEdit::class)->name('users.edit')->whereNumber('user');
     });
 
-    Route::get('/terminal', TerminalIndex::class)->name('terminal')->middleware('can.access.terminal');
+    // The global /terminal route SSHes into the host server, NOT a
+    // specific container. Clients must never reach it, so we stack
+    // restrict.client on top of the can.access.terminal middleware.
+    // Container-level terminals (project.application.command,
+    // project.service.command, project.database.command) intentionally
+    // stay available to clients and are protected per-project by the
+    // RestrictsToClientProjects global scope inside the Livewire
+    // components that load the target resource by uuid.
+    Route::get('/terminal', TerminalIndex::class)->name('terminal')->middleware(['can.access.terminal', 'restrict.client']);
     Route::post('/terminal/auth', function () {
         if (auth()->check()) {
             return response()->json(['authenticated' => true], 200);

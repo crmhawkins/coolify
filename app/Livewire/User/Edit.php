@@ -168,10 +168,14 @@ class Edit extends Component
                 return;
             }
 
+            // Clients land on the white-labelled /clientes login; internal
+            // users go to the standard /login with certificate support.
+            $loginPath = $user->is_client ? '/clientes' : '/login';
+
             $team->notify(new NewClientCredentials(
                 user: $user,
                 plainPassword: $plainPassword,
-                loginUrl: rtrim(base_url(), '/').'/login',
+                loginUrl: rtrim(base_url(), '/').$loginPath,
                 instanceName: config('app.name'),
                 isPasswordReset: true,
             ));

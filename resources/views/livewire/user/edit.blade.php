@@ -34,12 +34,20 @@
         @if ($availableProjects->isEmpty())
             <div class="text-sm text-neutral-500">No tienes proyectos en este team todavía.</div>
         @else
-            <div class="flex flex-col gap-1 pt-2 max-w-xl">
-                @foreach ($availableProjects as $project)
-                    <label class="flex items-center gap-2">
-                        <input type="checkbox" wire:model="assignedProjectIds" value="{{ $project->id }}">
-                        <span>{{ $project->name }}</span>
-                    </label>
+            {{-- Projects are chunked into columns of exactly 10 items. With
+                 11 projects the first column holds 10 and the second holds
+                 1; with 25 the layout is 10 / 10 / 5; and so on. On mobile
+                 every chunk stacks vertically. --}}
+            <div class="flex flex-wrap gap-x-10 gap-y-4 pt-2">
+                @foreach ($availableProjects->chunk(10) as $chunk)
+                    <div class="flex flex-col gap-1 min-w-[14rem]">
+                        @foreach ($chunk as $project)
+                            <label class="flex items-center gap-2">
+                                <input type="checkbox" wire:model="assignedProjectIds" value="{{ $project->id }}">
+                                <span class="truncate">{{ $project->name }}</span>
+                            </label>
+                        @endforeach
+                    </div>
                 @endforeach
             </div>
         @endif

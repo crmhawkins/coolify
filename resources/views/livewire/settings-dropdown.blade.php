@@ -114,14 +114,8 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
             </svg>
-
-            <!-- Unread Count Badge -->
-            @if ($unreadCount > 0)
-                <span
-                    class="absolute -top-1 -right-1 bg-error text-white text-xs rounded-full w-4.5 h-4.5 flex items-center justify-center">
-                    {{ $unreadCount > 9 ? '9+' : $unreadCount }}
-                </span>
-            @endif
+            {{-- Unread count badge intentionally removed so the changelog
+                 notifications do not clutter the navbar. --}}
         </button>
 
         <!-- Dropdown Menu -->
@@ -132,35 +126,8 @@
             <div
                 class="p-1 bg-white border rounded-sm shadow-lg dark:bg-coolgray-200 dark:border-coolgray-300 border-neutral-300">
                 <div class="flex flex-col gap-1">
-                    <!-- What's New Section -->
-                    @if ($unreadCount > 0)
-                        <button wire:click="openWhatsNewModal" @click="dropdownOpen = false"
-                            class="px-1 dropdown-item-no-padding flex items-center justify-between">
-                            <div class="flex items-center gap-2">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                <span>What's New</span>
-                            </div>
-                            <span
-                                class="bg-error text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                                {{ $unreadCount > 9 ? '9+' : $unreadCount }}
-                            </span>
-                        </button>
-                    @else
-                        <button wire:click="openWhatsNewModal" @click="dropdownOpen = false"
-                            class="px-1 dropdown-item-no-padding flex items-center gap-2">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            <span>Changelog</span>
-                        </button>
-                    @endif
-
-                    <!-- Divider -->
-                    <div class="border-b dark:border-coolgray-500 border-neutral-300"></div>
+                    {{-- What's New / Changelog section removed: we do not want
+                         Coolify release notifications leaking into the panel. --}}
 
                     <!-- Theme Section -->
                     <div class="font-bold border-b dark:border-coolgray-500 border-neutral-300 dark:text-white pb-1">

@@ -79,27 +79,39 @@
     }">
     <div class="flex lg:pt-6 pt-4 pb-4 pl-2">
         <div class="flex flex-col w-full">
-            <a href="/" {{ wireNavigate() }} class="text-2xl font-bold tracking-wide dark:text-white hover:opacity-80 transition-opacity">Coolify</a>
-            <x-version />
+            @if (auth()->user()->isClient())
+                <a href="/" {{ wireNavigate() }} class="flex items-center hover:opacity-80 transition-opacity">
+                    <x-client-logo class="h-10 w-auto" />
+                </a>
+            @else
+                {{-- Version tag intentionally hidden to keep the sidebar clean. --}}
+                <a href="/" {{ wireNavigate() }} class="text-2xl font-bold tracking-wide dark:text-white hover:opacity-80 transition-opacity">Coolify</a>
+            @endif
         </div>
-        <div>
-            <!-- Search button that triggers global search modal -->
-            <button @click="$dispatch('open-global-search')" type="button" title="Search (Press / or ⌘K)"
-                class="flex items-center gap-1.5 px-2.5 py-1.5 bg-neutral-100 dark:bg-coolgray-100 border border-neutral-300 dark:border-coolgray-200 rounded-md hover:bg-neutral-200 dark:hover:bg-coolgray-200 transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-neutral-500 dark:text-neutral-400"
-                    fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                <kbd
-                    class="px-1 py-0.5 text-xs font-semibold text-neutral-500 dark:text-neutral-400 bg-neutral-200 dark:bg-coolgray-200 rounded">/</kbd>
-            </button>
+        @if (! auth()->user()->isClient())
+            <div>
+                <!-- Search button that triggers global search modal -->
+                <button @click="$dispatch('open-global-search')" type="button" title="Search (Press / or ⌘K)"
+                    class="flex items-center gap-1.5 px-2.5 py-1.5 bg-neutral-100 dark:bg-coolgray-100 border border-neutral-300 dark:border-coolgray-200 rounded-md hover:bg-neutral-200 dark:hover:bg-coolgray-200 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-neutral-500 dark:text-neutral-400"
+                        fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    <kbd
+                        class="px-1 py-0.5 text-xs font-semibold text-neutral-500 dark:text-neutral-400 bg-neutral-200 dark:bg-coolgray-200 rounded">/</kbd>
+                </button>
+            </div>
+            <livewire:settings-dropdown />
+        @endif
+    </div>
+    @if (! auth()->user()->isClient())
+        <div class="px-2 pt-2 pb-7">
+            <livewire:switch-team />
         </div>
-        <livewire:settings-dropdown />
-    </div>
-    <div class="px-2 pt-2 pb-7">
-        <livewire:switch-team />
-    </div>
+    @else
+        <div class="pb-4"></div>
+    @endif
     <ul role="list" class="flex flex-col flex-1 gap-y-7">
         <li class="flex-1 overflow-x-hidden">
             <ul role="list" class="flex flex-col h-full space-y-1.5">
@@ -246,21 +258,28 @@
                         </a>
                     </li>
                     @endif
+                    {{-- The sidebar Terminal item links to the global
+                         /terminal route which SSHes into a host server.
+                         That is admin-only regardless of the canAccessTerminal
+                         gate (which was opened up to clients so per-container
+                         Files/Terminal buttons work). Hide it for clients. --}}
                     @can('canAccessTerminal')
-                        <li>
-                            <a title="Terminal"
-                                class="{{ request()->is('terminal*') ? 'menu-item-active menu-item' : 'menu-item' }}"
-                                href="{{ route('terminal') }}">
-                                <svg class="menu-item-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-                                    stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round"
-                                    stroke-linejoin="round">
-                                    <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-                                    <path d="M5 7l5 5l-5 5" />
-                                    <path d="M12 19l7 0" />
-                                </svg>
-                                <span class="menu-item-label">Terminal</span>
-                            </a>
-                        </li>
+                        @if (! auth()->user()->isClient())
+                            <li>
+                                <a title="Terminal"
+                                    class="{{ request()->is('terminal*') ? 'menu-item-active menu-item' : 'menu-item' }}"
+                                    href="{{ route('terminal') }}">
+                                    <svg class="menu-item-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                                        stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round"
+                                        stroke-linejoin="round">
+                                        <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+                                        <path d="M5 7l5 5l-5 5" />
+                                        <path d="M12 19l7 0" />
+                                    </svg>
+                                    <span class="menu-item-label">Terminal</span>
+                                </a>
+                            </li>
+                        @endif
                     @endcan
                     <li>
                         <a title="Profile" {{ wireNavigate() }}
@@ -399,21 +418,9 @@
                 @if (!isSubscribed() && isCloud() && auth()->user()->teams()->get()->count() > 1)
                     <livewire:navbar-delete-team />
                 @endif
-                <li>
-                    <x-modal-input title="How can we help?">
-                        <x-slot:content>
-                            <div title="Send us feedback or get help!" class="cursor-pointer menu-item"
-                                wire:click="help">
-                                <svg class="menu-item-icon" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
-                                    <path fill="currentColor"
-                                        d="M140 180a12 12 0 1 1-12-12a12 12 0 0 1 12 12M128 72c-22.06 0-40 16.15-40 36v4a8 8 0 0 0 16 0v-4c0-11 10.77-20 24-20s24 9 24 20s-10.77 20-24 20a8 8 0 0 0-8 8v8a8 8 0 0 0 16 0v-.72c18.24-3.35 32-17.9 32-35.28c0-19.85-17.94-36-40-36m104 56A104 104 0 1 1 128 24a104.11 104.11 0 0 1 104 104m-16 0a88 88 0 1 0-88 88a88.1 88.1 0 0 0 88-88" />
-                                </svg>
-                                <span class="menu-item-label">Feedback</span>
-                            </div>
-                        </x-slot:content>
-                        <livewire:help />
-                    </x-modal-input>
-                </li>
+                {{-- Feedback button removed globally: we do not want a
+                     Coolify-branded support link in the panel. Logout stays
+                     below because it lives in its own <li>. --}}
                 <li>
                     <form action="/logout" method="POST">
                         @csrf

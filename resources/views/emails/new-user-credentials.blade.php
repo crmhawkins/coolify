@@ -1,10 +1,10 @@
-<x-emails.layout>
-Hola {{ $name }},
+<x-emails.client-layout>
+Buenas {{ $name }},
 
 @if (isset($isPasswordReset) && $isPasswordReset)
-Tu contraseña en **{{ $instanceName }}** ha sido restablecida por un administrador.
+Tu contraseña en nuestro servidor ha sido restablecida por un administrador.
 @else
-Se ha creado una cuenta para ti en **{{ $instanceName }}**.
+Se le ha creado una cuenta en nuestro servidor para la gestión de su proyecto.
 @endif
 
 Estas son tus credenciales de acceso:
@@ -13,8 +13,11 @@ Estas son tus credenciales de acceso:
 - **Email:** {{ $email }}
 - **Contraseña:** {{ $password }}
 
-Por seguridad, te recomendamos cambiar la contraseña una vez hayas iniciado sesión.
+Si pierdes la contraseña no dudes en contactar con nosotros y te la volveremos a generar.
 
-Si no esperabas este correo, ignóralo o contacta con el administrador.
-</x-emails.layout>
-{{-- resync-marker 2026-04-08 --}}
+Cualquier duda que tengas estaremos encantado de resolverla.
+
+Un Cordial saludo,
+
+Los Creativos de Hawkins.
+</x-emails.client-layout>

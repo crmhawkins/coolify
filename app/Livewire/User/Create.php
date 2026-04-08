@@ -96,7 +96,10 @@ class Create extends Component
 
             $this->generatedPassword = $plainPassword;
             $this->createdEmail = $user->email;
-            $this->loginUrl = rtrim(base_url(), '/').'/login';
+            // Clients land on the white-labelled /clientes login; internal
+            // users go to the standard /login with certificate support.
+            $loginPath = $this->isClient ? '/clientes' : '/login';
+            $this->loginUrl = rtrim(base_url(), '/').$loginPath;
 
             $this->sendCredentialsEmail($user, $plainPassword);
 

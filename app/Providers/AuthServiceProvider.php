@@ -72,9 +72,24 @@ class AuthServiceProvider extends ServiceProvider
         // Register gates for resource creation policy
         Gate::define('createAnyResource', [ResourceCreatePolicy::class, 'createAny']);
 
-        // Register gate for terminal access
+        // Register gate for terminal / file-explorer access.
+        //
+        // Scoped client users are included here so they can use the
+        // per-container Files and Terminal buttons on their assigned
+        // projects. The gate by itself grants access in principle; per
+        // project/application/service authorization is enforced by the
+        // RestrictsToClientProjects global scope when FileExplorer and
+        // ExecuteContainerCommand load the target resource by uuid —
+        // if a client tries to open a container that is not inside an
+        // assigned project, the ->firstOrFail() raises 404.
+        //
+        // The ONLY place this gate is not enough is the global /terminal
+        // route (TerminalIndex → SSH to the host, not exec in a
+        // container). That route is additionally guarded with
+        // restrict.client middleware in routes/web.php so clients can
+        // never SSH into a server.
         Gate::define('canAccessTerminal', function ($user) {
-            return $user->isAdmin() || $user->isOwner();
+            return $user->isAdmin() || $user->isOwner() || (method_exists($user, 'isClient') && $user->isClient());
         });
     }
 }
