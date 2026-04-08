@@ -48,10 +48,31 @@
                         </span>
                     @endif
 
+                    {{-- Bulk run button: fires every non-Closure task in
+                         sequence and updates each card's status badge via
+                         the same cache pipeline used by "Ejecutar".
+                         Disabled during the run AND during a normal
+                         Recargar so the two actions never overlap.
+                         Confirmation dialog avoids accidental mass runs. --}}
+                    <button
+                        type="button"
+                        wire:click="executeAllTasksNow"
+                        wire:confirm="Esto ejecutará todas las tareas del scheduler (excepto las Closure). ¿Continuar?"
+                        wire:loading.attr="disabled"
+                        wire:target="executeAllTasksNow,loadScheduleList"
+                        class="rounded px-3 py-1.5 text-xs font-semibold transition-all disabled:opacity-60"
+                        style="background-color:#8b5cf6;color:#ffffff;box-shadow:0 1px 3px rgba(139,92,246,0.4);"
+                        onmouseover="this.style.backgroundColor='#7c3aed'"
+                        onmouseout="this.style.backgroundColor='#8b5cf6'"
+                    >
+                        <span wire:loading.remove wire:target="executeAllTasksNow">Ejecutar todas</span>
+                        <span wire:loading wire:target="executeAllTasksNow">Ejecutando…</span>
+                    </button>
+
                     <x-forms.button
                         wire:click="loadScheduleList"
                         wire:loading.attr="disabled"
-                        wire:target="loadScheduleList"
+                        wire:target="loadScheduleList,executeAllTasksNow"
                     >
                         <span wire:loading.remove wire:target="loadScheduleList">Recargar</span>
                         <span wire:loading wire:target="loadScheduleList">Cargando…</span>

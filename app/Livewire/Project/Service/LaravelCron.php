@@ -611,8 +611,7 @@ class LaravelCron extends Component
             return;
         }
 
-        $taskCommand = (string) data_get($this->scheduledTasks[$index], 'command', '');
-        $taskCommand = trim($taskCommand);
+        $taskCommand = trim((string) data_get($this->scheduledTasks[$index], 'command', ''));
         if ($taskCommand === '') {
             $this->dispatch('error', 'Task command is empty.');
 
@@ -628,36 +627,144 @@ class LaravelCron extends Component
             return;
         }
 
+        $context = $this->getSelectedContainerApplicationContext();
+        if (! $context) {
+            $this->dispatch('error', 'Container not found or not running.');
+
+            return;
+        }
+
+        $this->schedulerOutput = '';
+
+        $result = $this->runArtisanTaskForCard($index, $taskCommand, $context);
+
+        if ($result['status'] === 'success') {
+            $this->dispatch('success', 'Task executed successfully.');
+        } else {
+            // Auto-expand the error panel on failure so the user sees it
+            // without having to click.
+            $this->expandedErrors[$index] = true;
+            $message = $result['exit_code'] !== null
+                ? "Task finished with exit code {$result['exit_code']}."
+                : 'Error executing task.';
+            $this->dispatch('error', $message);
+        }
+    }
+
+    /**
+     * Bulk-run every non-Closure task in $this->scheduledTasks and persist
+     * each result via persistTaskStatus so the card grid reflects the
+     * outcome on next render. Continues on failures so one broken command
+     * does not abort the loop. Emits a single summary event at the end.
+     */
+    public function executeAllTasksNow(): void
+    {
+        if ($this->scheduledTasks === []) {
+            $this->dispatch('error', 'No hay tareas que ejecutar.');
+
+            return;
+        }
+
+        $context = $this->getSelectedContainerApplicationContext();
+        if (! $context) {
+            $this->dispatch('error', 'Container not found or not running.');
+
+            return;
+        }
+
+        $this->schedulerOutput = '';
+
+        $total = 0;
+        $success = 0;
+        $failed = 0;
+        $skipped = 0;
+
+        foreach ($this->scheduledTasks as $index => $task) {
+            $taskCommand = trim((string) data_get($task, 'command', ''));
+
+            if ($taskCommand === '' || str_starts_with($taskCommand, 'Closure')) {
+                $skipped++;
+
+                continue;
+            }
+
+            $total++;
+            $result = $this->runArtisanTaskForCard($index, $taskCommand, $context);
+
+            if ($result['status'] === 'success') {
+                $success++;
+            } else {
+                $failed++;
+            }
+        }
+
+        $parts = ["Ejecutadas {$total} tareas"];
+        if ($success > 0) {
+            $parts[] = "{$success} correctas";
+        }
+        if ($failed > 0) {
+            $parts[] = "{$failed} con fallo";
+        }
+        if ($skipped > 0) {
+            $parts[] = "{$skipped} Closure omitidas";
+        }
+        $summary = implode(' · ', $parts).'.';
+
+        if ($failed === 0 && $total > 0) {
+            $this->dispatch('success', $summary);
+        } elseif ($failed > 0) {
+            $this->dispatch('error', $summary);
+        } else {
+            $this->dispatch('warning', $summary);
+        }
+    }
+
+    /**
+     * Runs a single artisan task inside the selected Laravel container and
+     * persists its outcome in cache + in-memory scheduledTasks via
+     * persistTaskStatus(). Returns an array with the captured status, the
+     * artisan exit code, and the trimmed stdout/stderr so the caller can
+     * decide what user-facing event to dispatch.
+     *
+     * Used by both executeTaskNow() (single-task click) and
+     * executeAllTasksNow() (bulk run from the header button).
+     *
+     * @param  array{container: array<string, mixed>, application: mixed, server: mixed, escapedContainer: string}  $context
+     * @return array{status: string, exit_code: ?int, output: string}
+     */
+    private function runArtisanTaskForCard(int $index, string $taskCommand, array $context): array
+    {
+        $server = $context['server'];
+        $escapedContainer = $context['escapedContainer'];
+
+        $tokens = preg_split('/\s+/', $taskCommand) ?: [];
+        $tokens = array_values(array_filter($tokens, fn ($t) => $t !== ''));
+
+        // "php artisan xxx" → drop the leading "php artisan" so we don't
+        // invoke php twice when we build the docker exec command below.
+        if (count($tokens) >= 2 && strtolower($tokens[0]) === 'php' && strtolower($tokens[1]) === 'artisan') {
+            $tokens = array_slice($tokens, 2);
+        }
+
+        foreach ($tokens as $token) {
+            if (preg_match('/[;&|`$<>\\\\]/', (string) $token)) {
+                $this->persistTaskStatus($index, [
+                    'command' => $taskCommand,
+                    'status' => 'error',
+                    'status_label' => 'Falló',
+                    'status_output' => 'Invalid task command (contains unsafe shell characters).',
+                    'status_source' => 'manual',
+                    'status_at' => now()->format('Y-m-d H:i:s'),
+                ]);
+
+                return ['status' => 'error', 'exit_code' => null, 'output' => 'Invalid task command.'];
+            }
+        }
+
         try {
-            $context = $this->getSelectedContainerApplicationContext();
-            if (! $context) {
-                $this->dispatch('error', 'Container not found or not running.');
-
-                return;
-            }
-
-            $server = $context['server'];
-            $escapedContainer = $context['escapedContainer'];
-
-            $tokens = preg_split('/\s+/', $taskCommand) ?: [];
-            $tokens = array_values(array_filter($tokens, fn ($t) => $t !== ''));
-
-            // "php artisan xxx" → drop the leading "php artisan"
-            if (count($tokens) >= 2 && strtolower($tokens[0]) === 'php' && strtolower($tokens[1]) === 'artisan') {
-                $tokens = array_slice($tokens, 2);
-            }
-
-            foreach ($tokens as $token) {
-                if (preg_match('/[;&|`$<>\\\\]/', (string) $token)) {
-                    $this->dispatch('error', 'Invalid task command.');
-
-                    return;
-                }
-            }
-
-            // Execute wrapped in `set -o pipefail; ... ; echo __EXIT__=$?` so
-            // we can capture the artisan exit code even when instant_remote_process
-            // does not expose it directly.
+            // Execute wrapped in `... ; echo __EXIT__=$?` so we can capture
+            // the artisan exit code even when instant_remote_process does
+            // not expose it directly.
             $artisanArgs = implode(' ', array_map('escapeshellarg', $tokens));
             $innerScript = "php /var/www/html/artisan {$artisanArgs} 2>&1; echo \"__EXIT__=\$?\"";
             $command = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($innerScript);
@@ -667,8 +774,6 @@ class LaravelCron extends Component
 
             $rawOutput = (string) (instant_remote_process([$command], $server, false) ?? '');
 
-            // Extract the exit code and strip the sentinel from the displayed
-            // output so the user sees only what artisan actually printed.
             $exitCode = null;
             if (preg_match('/__EXIT__=(\d+)\s*$/', $rawOutput, $m)) {
                 $exitCode = (int) $m[1];
@@ -689,16 +794,7 @@ class LaravelCron extends Component
                 'status_at' => now()->format('Y-m-d H:i:s'),
             ]);
 
-            $this->schedulerOutput = '';
-
-            if ($ok) {
-                $this->dispatch('success', 'Task executed successfully.');
-            } else {
-                $this->dispatch('error', "Task finished with exit code {$exitCode}.");
-                // Auto-expand the error panel on failure so the user sees it
-                // without having to click.
-                $this->expandedErrors[$index] = true;
-            }
+            return ['status' => $status, 'exit_code' => $exitCode, 'output' => $rawOutput];
         } catch (\Throwable $e) {
             $this->persistTaskStatus($index, [
                 'command' => $taskCommand,
@@ -708,8 +804,8 @@ class LaravelCron extends Component
                 'status_source' => 'manual',
                 'status_at' => now()->format('Y-m-d H:i:s'),
             ]);
-            $this->expandedErrors[$index] = true;
-            $this->dispatch('error', 'Error executing task: '.$e->getMessage());
+
+            return ['status' => 'error', 'exit_code' => null, 'output' => $e->getMessage()];
         }
     }
 
