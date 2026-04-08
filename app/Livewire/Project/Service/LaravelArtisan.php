@@ -553,8 +553,17 @@ class LaravelArtisan extends Component
             }
         }
 
+        // IMPORTANT: redirect stderr to stdout so we capture deprecations,
+        // Laravel's exception renderer output (`-v`/`-vvv`) and any other
+        // error channel that artisan writes to. Without `2>&1` a command
+        // like `emails:fetch -vvv` that only prints to stderr ends up
+        // showing an empty output box to the user even though it did run.
+        // Wrapping in `sh -lc` also gives us a real login shell with a
+        // working PATH, which matches how the scheduler actually runs
+        // the command inside the container.
         $artisanArgs = implode(' ', array_map('escapeshellarg', $tokens));
-        $command = "docker exec {$escapedContainer} php /var/www/html/artisan {$artisanArgs}";
+        $innerScript = "php /var/www/html/artisan {$artisanArgs} 2>&1; echo \"__EXIT__=\$?\"";
+        $command = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($innerScript);
         if ($server->isNonRoot()) {
             $command = "sudo {$command}";
         }
@@ -563,8 +572,28 @@ class LaravelArtisan extends Component
         $this->output = '';
 
         try {
-            $this->output = (string) (instant_remote_process([$command], $server, false) ?? '');
-            $this->dispatch('success', 'Artisan command executed.');
+            $rawOutput = (string) (instant_remote_process([$command], $server, false) ?? '');
+
+            // Extract and strip the sentinel exit code so the user only sees
+            // what artisan actually printed. We still expose the exit code
+            // at the end of the output for commands that returned non-zero
+            // so it is obvious the command failed without scrolling up.
+            $exitCode = null;
+            if (preg_match('/__EXIT__=(\d+)\s*$/', $rawOutput, $m)) {
+                $exitCode = (int) $m[1];
+                $rawOutput = preg_replace('/__EXIT__=\d+\s*$/', '', $rawOutput) ?: $rawOutput;
+            }
+
+            $this->output = rtrim($rawOutput);
+
+            if ($exitCode === null || $exitCode === 0) {
+                $this->dispatch('success', 'Artisan command executed.');
+            } else {
+                if ($this->output === '') {
+                    $this->output = "(el comando terminó con exit code {$exitCode} sin imprimir nada)";
+                }
+                $this->dispatch('error', "Artisan command exited with code {$exitCode}.");
+            }
         } catch (\Throwable $e) {
             $this->output = $e->getMessage();
             $this->dispatch('error', 'Error running artisan: '.$e->getMessage());

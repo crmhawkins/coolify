@@ -197,7 +197,9 @@
                             <h3 class="text-base font-semibold" style="color:#ffffff;">Configuración PHP (php.ini)</h3>
                         </div>
                         <p class="mt-0.5 text-xs" style="color:#a1a1aa;">
-                            Valores actuales de PHP en el contenedor Laravel seleccionado.
+                            Edita los valores de PHP del contenedor Laravel. Se guardan en
+                            <span class="font-mono" style="color:#c4b5fd;">conf.d/zzz-coolify-laravel-manager.ini</span>
+                            dentro del contenedor y se recarga PHP-FPM automáticamente.
                         </p>
                     </div>
 
@@ -231,20 +233,103 @@
                                     Cargando configuración PHP…
                                 </div>
                             @elseif (!empty($phpIniSettings))
-                                <div class="grid gap-2 md:grid-cols-2">
-                                    @foreach ($phpIniSettings as $setting => $value)
+                                {{-- Editable grid. Every key mapped in
+                                     LaravelManager::PHP_INI_EDITABLE_KEYS
+                                     gets its own input bound to
+                                     $phpIniEditableValues. Label on top,
+                                     input below; descriptions on hover. --}}
+                                @php
+                                    $phpIniDescriptions = [
+                                        'upload_max_filesize' => 'Tamaño máximo de un archivo subido (ej: 100M)',
+                                        'post_max_size' => 'Tamaño máximo de un POST (debe ser ≥ upload_max_filesize)',
+                                        'max_execution_time' => 'Tiempo máximo en segundos para un script (0 = sin límite)',
+                                        'max_input_time' => 'Tiempo máximo en segundos para parsear la request',
+                                        'memory_limit' => 'Memoria máxima que puede usar un script (ej: 512M)',
+                                        'max_input_vars' => 'Número máximo de variables de entrada en una request',
+                                        'max_file_uploads' => 'Número máximo de archivos en una sola subida',
+                                        'opcache.memory_consumption' => 'MB de memoria compartida para OPcache (ej: 256)',
+                                        'opcache.max_accelerated_files' => 'Máximo de archivos PHP cacheados por OPcache',
+                                        'opcache.revalidate_freq' => 'Segundos entre revalidaciones de archivos (0 = siempre)',
+                                        'realpath_cache_size' => 'Tamaño del cache de resolución de rutas (ej: 4096K)',
+                                        'realpath_cache_ttl' => 'TTL en segundos del cache de rutas',
+                                    ];
+                                @endphp
+                                <div class="grid gap-3 md:grid-cols-2">
+                                    @foreach (\App\Livewire\Project\Service\LaravelManager::PHP_INI_EDITABLE_KEYS as $setting)
                                         <div
-                                            class="rounded px-3 py-2 flex items-center justify-between gap-3"
+                                            class="rounded px-3 py-2.5"
                                             style="background-color:#0a0a0a;border:1px solid #27272a;"
                                         >
-                                            <span class="text-xs font-mono truncate" style="color:#a1a1aa;" title="{{ $setting }}">
+                                            <label
+                                                for="php_ini_{{ $setting }}"
+                                                class="block text-xs font-mono mb-1 truncate"
+                                                style="color:#a1a1aa;"
+                                                title="{{ $phpIniDescriptions[$setting] ?? $setting }}"
+                                            >
                                                 {{ $setting }}
-                                            </span>
-                                            <span class="text-xs font-mono font-semibold shrink-0" style="color:#c4b5fd;">
-                                                {{ $value }}
-                                            </span>
+                                            </label>
+                                            <input
+                                                id="php_ini_{{ $setting }}"
+                                                type="text"
+                                                wire:model="phpIniEditableValues.{{ $setting }}"
+                                                class="w-full rounded px-2 py-1 text-sm font-mono font-semibold"
+                                                style="background-color:#18181b;color:#c4b5fd;border:1px solid #3f3f46;"
+                                                placeholder="{{ $phpIniSettings[$setting] ?? '' }}"
+                                                spellcheck="false"
+                                                autocomplete="off"
+                                            />
                                         </div>
                                     @endforeach
+                                </div>
+
+                                <div
+                                    class="rounded px-3 py-2 text-xs"
+                                    style="background-color:rgba(139,92,246,0.08);color:#c4b5fd;border:1px solid rgba(139,92,246,0.25);"
+                                >
+                                    <strong>Nota:</strong> Al guardar se crea el fichero
+                                    <span class="font-mono">/usr/local/etc/php/conf.d/zzz-coolify-laravel-manager.ini</span>
+                                    dentro del contenedor y se recarga PHP-FPM con SIGUSR2.
+                                    Si no se refleja al instante, reinicia el contenedor desde Coolify.
+                                </div>
+
+                                <div class="flex flex-wrap gap-2 pt-1">
+                                    <button
+                                        type="button"
+                                        wire:click="savePhpIniSettings"
+                                        wire:loading.attr="disabled"
+                                        wire:target="savePhpIniSettings"
+                                        class="rounded px-3 py-1.5 text-xs font-semibold transition-all disabled:opacity-60"
+                                        style="background-color:#8b5cf6;color:#ffffff;box-shadow:0 1px 3px rgba(139,92,246,0.4);"
+                                        onmouseover="this.style.backgroundColor='#7c3aed'"
+                                        onmouseout="this.style.backgroundColor='#8b5cf6'"
+                                    >
+                                        <span wire:loading.remove wire:target="savePhpIniSettings">Guardar cambios</span>
+                                        <span wire:loading wire:target="savePhpIniSettings">Guardando…</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        wire:click="applyRecommendedPhpDefaults"
+                                        wire:confirm="Esto rellenará los campos con los defaults recomendados para Laravel Rootkit. Tendrás que pulsar Guardar para aplicarlos. ¿Continuar?"
+                                        class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
+                                        style="background-color:#27272a;color:#c4b5fd;border:1px solid #3f3f46;"
+                                        onmouseover="this.style.backgroundColor='#3f3f46'"
+                                        onmouseout="this.style.backgroundColor='#27272a'"
+                                    >
+                                        Aplicar defaults recomendados
+                                    </button>
+                                    <button
+                                        type="button"
+                                        wire:click="loadPhpIniSettings"
+                                        wire:loading.attr="disabled"
+                                        wire:target="loadPhpIniSettings"
+                                        class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
+                                        style="background-color:#27272a;color:#e4e4e7;border:1px solid #3f3f46;"
+                                        onmouseover="this.style.backgroundColor='#3f3f46'"
+                                        onmouseout="this.style.backgroundColor='#27272a'"
+                                    >
+                                        <span wire:loading.remove wire:target="loadPhpIniSettings">Recargar valores</span>
+                                        <span wire:loading wire:target="loadPhpIniSettings">Cargando…</span>
+                                    </button>
                                 </div>
                             @else
                                 <div
