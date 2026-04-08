@@ -51,17 +51,35 @@
                             />
 
                             @if (! empty($filteredArtisanCommands))
-                                <div class="absolute z-30 left-0 right-0 mt-1 bg-white dark:bg-coolgray-800 border border-coolgray-300 dark:border-coolgray-600 rounded shadow-lg max-h-[420px] overflow-auto">
+                                {{-- The dropdown background is a hard white in
+                                     both light and dark themes because the
+                                     Coolify dark mode was leaking bg-white over
+                                     dark:bg-coolgray-800 in the live container.
+                                     Instead of fighting the cascade we commit
+                                     to white-on-black colours here and override
+                                     them with !important-level utility classes
+                                     via inline style as a belt-and-braces so
+                                     the text is always readable regardless of
+                                     what theme Coolify thinks it is in. --}}
+                                <div
+                                    class="absolute z-30 left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-[420px] overflow-auto"
+                                    style="background-color:#ffffff;color:#0b1220;"
+                                >
                                     @foreach ($filteredArtisanCommands as $cmd)
                                         <button
                                             type="button"
-                                            class="w-full px-3 py-2 hover:bg-neutral-100 dark:hover:bg-coolgray-700 flex items-center gap-2 text-left text-gray-900 dark:text-gray-100"
+                                            class="w-full px-3 py-2 hover:bg-gray-100 flex items-center gap-2 text-left"
+                                            style="color:#0b1220;background-color:#ffffff;"
                                             wire:click="selectCommand(@js($cmd['name']))"
                                         >
-                                            <span class="font-mono text-sm whitespace-nowrap text-black dark:text-gray-100 min-w-[140px]">{{ $cmd['name'] }}</span>
+                                            <span
+                                                class="font-mono text-sm whitespace-nowrap min-w-[140px]"
+                                                style="color:#0b1220;"
+                                            >{{ $cmd['name'] }}</span>
                                             @if (! empty($cmd['description']))
                                                 <span
-                                                    class="text-xs text-gray-700 dark:text-gray-300 truncate"
+                                                    class="text-xs truncate"
+                                                    style="color:#374151;"
                                                     title="{{ $cmd['description'] }}"
                                                 >
                                                     — {{ $cmd['description'] }}
