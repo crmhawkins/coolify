@@ -172,14 +172,26 @@
                 @endif
 
                 {{-- Output panel: shown only when a task execution produces
-                     something, or the source-level fallback has a message --}}
-                @if (! empty($schedulerOutput))
+                     something useful. We also explicitly filter out the
+                     "notfound" sentinel that the supervisorctl probe emits
+                     when the binary is missing from the container — the
+                     PHP side already collapses it to empty, but keeping
+                     this second guard in the view means old cached
+                     versions of LaravelCron.php still render cleanly
+                     without leaking the sentinel to the user. --}}
+                @php
+                    $schedulerOutputClean = trim((string) ($schedulerOutput ?? ''));
+                    if ($schedulerOutputClean === 'notfound') {
+                        $schedulerOutputClean = '';
+                    }
+                @endphp
+                @if ($schedulerOutputClean !== '')
                     <div class="w-full">
                         <div class="mb-2 text-sm font-medium" style="color:#e4e4e7;">Salida:</div>
                         <pre
                             class="w-full whitespace-pre-wrap break-words border rounded px-4 py-3 text-sm font-mono min-h-[8rem] max-h-[40vh] overflow-auto"
                             style="background-color:#0a0a0a;color:#e4e4e7;border-color:#27272a;"
-                        >{{ $schedulerOutput }}</pre>
+                        >{{ $schedulerOutputClean }}</pre>
                     </div>
                 @endif
             @endif
