@@ -272,10 +272,15 @@ class LaravelCron extends Component
                 return;
             }
 
+            // Source-level fallback. We grep for both the static
+            // Schedule::command(...) invocation style and the
+            // $schedule->command(...) / $schedule->job(...) style used in the
+            // classic app/Console/Kernel.php schedule() method. The filename
+            // prefix in grep output lets us reconstruct the origin column.
             $sourceCommand = "docker exec {$escapedContainer} sh -lc "
                 .escapeshellarg(
                     "cd /var/www/html && "
-                    ."(grep -RInE \"Schedule::|->(cron|everyMinute|everyTwoMinutes|everyThreeMinutes|everyFourMinutes|everyFiveMinutes|everyTenMinutes|everyFifteenMinutes|everyThirtyMinutes|hourly|daily|weekly|monthly|yearly|timezone|between|weekdays|sundays|mondays|tuesdays|wednesdays|thursdays|fridays|saturdays|withoutOverlapping|onOneServer|runInBackground)\" routes app/Console 2>/dev/null || true)"
+                    ."(grep -RInE \"(Schedule::|\\\\\\\$schedule->)(command|call|exec|job)\\(\" routes app/Console 2>/dev/null || true)"
                 );
             if ($server->isNonRoot()) {
                 $sourceCommand = "sudo {$sourceCommand}";
@@ -450,6 +455,15 @@ class LaravelCron extends Component
     }
 
     /**
+     * Parses the raw grep output from the source-level fallback into a
+     * structured task list. Each match of a Schedule::command(...) or
+     * $schedule->command(...) invocation becomes a row with the inferred
+     * artisan command name in `command` and the cron expression / interval
+     * shortcut (everyMinute / dailyAt('08:00') / cron('* * * * *') / etc)
+     * in `expression`. If we cannot find either on the same line we still
+     * produce a row so the user at least sees that a schedule entry was
+     * detected, along with the file and line number in `description`.
+     *
      * @return array<int, array{command: string, expression: string, next_due: string, last_run: string, description: string}>
      */
     private function parseScheduleSourceOutput(string $raw): array
@@ -459,7 +473,6 @@ class LaravelCron extends Component
         }
 
         $tasks = [];
-        $currentTask = null;
 
         foreach (preg_split('/\r?\n/', $raw) ?: [] as $line) {
             $line = trim($line);
@@ -467,34 +480,48 @@ class LaravelCron extends Component
                 continue;
             }
 
+            // grep -In prints "path/to/file:line:content".
             $parts = preg_split('/:/', $line, 3);
-            $location = count($parts) >= 2 ? "{$parts[0]}:{$parts[1]}" : 'project source';
-            $content = count($parts) === 3 ? trim($parts[2]) : $line;
+            if (count($parts) < 3) {
+                continue;
+            }
+            $location = "{$parts[0]}:{$parts[1]}";
+            $content = trim((string) $parts[2]);
 
-            $startsNewTask = str_contains($content, 'Schedule::');
-
-            if ($startsNewTask || $currentTask === null) {
-                if ($currentTask !== null) {
-                    $tasks[] = $currentTask;
-                }
-
-                $currentTask = [
-                    'command' => $content,
-                    'expression' => 'Defined in source',
-                    'next_due' => 'Resolve via artisan schedule:list',
-                    'last_run' => '',
-                    'description' => $location,
-                ];
-
+            // Only keep lines that actually invoke command()/call()/exec()/job().
+            // The grep already filters for this but defensive programming
+            // makes the parser robust to noise like comments that happen to
+            // contain the word "Schedule::".
+            if (! preg_match('/(?:Schedule::|\$schedule->)(command|call|exec|job)\s*\(\s*(.*)$/', $content, $kindMatch)) {
                 continue;
             }
 
-            $currentTask['command'] .= "\n".$content;
-            $currentTask['description'] .= ' -> '.$location;
-        }
+            // Extract the first string argument to command()/call()/etc as
+            // the task name. Handles both single and double quoted strings.
+            $commandName = '';
+            if (preg_match("/(?:Schedule::|\\\$schedule->)(?:command|call|exec|job)\s*\(\s*(['\"])([^'\"]+)\\1/", $content, $nameMatch)) {
+                $commandName = $nameMatch[2];
+            }
 
-        if ($currentTask !== null) {
-            $tasks[] = $currentTask;
+            // Infer the schedule expression from common helper calls on the
+            // same line. Laravel devs often chain everything on one line,
+            // so this catches the majority of real schedules.
+            $expression = '';
+            if (preg_match('/->cron\(\s*([\'"])([^\'"]+)\1/', $content, $cronMatch)) {
+                $expression = $cronMatch[2];
+            } elseif (preg_match('/->(everyMinute|everyTwoMinutes|everyThreeMinutes|everyFourMinutes|everyFiveMinutes|everyTenMinutes|everyFifteenMinutes|everyThirtyMinutes|hourly|hourlyAt|daily|dailyAt|twiceDaily|weekly|weeklyOn|monthly|monthlyOn|quarterly|yearly|yearlyOn|everySecond|everyTwoSeconds|everyFiveSeconds|everyTenSeconds|everyFifteenSeconds|everyThirtySeconds)\(([^)]*)\)/', $content, $helperMatch)) {
+                $helper = $helperMatch[1];
+                $args = trim($helperMatch[2]);
+                $expression = $args === '' ? $helper : $helper.'('.$args.')';
+            }
+
+            $tasks[] = [
+                'command' => $commandName !== '' ? $commandName : $content,
+                'expression' => $expression !== '' ? $expression : 'Defined in source',
+                'next_due' => 'Resolve via artisan schedule:list',
+                'last_run' => '',
+                'description' => $location,
+            ];
         }
 
         return collect($tasks)

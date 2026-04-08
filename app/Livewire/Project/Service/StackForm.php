@@ -449,21 +449,36 @@ class StackForm extends Component
         }
 
         $commands = [
+            // Single "Clear Cache All" action: runs every Laravel cache
+            // clear command in sequence so the UI only needs one button.
+            // The heredoc is the chain the Rebuild CSS/JS docs recommend
+            // after a deploy or a config change, with `|| true` so a single
+            // failing stage does not abort the rest.
+            'clear-all' => [
+                'label' => 'clear all (optimize:clear + config + route + view + cache + event)',
+                'command' =>
+                    'php artisan optimize:clear --no-ansi || true && '
+                    .'php artisan config:clear --no-ansi || true && '
+                    .'php artisan cache:clear --no-ansi || true && '
+                    .'php artisan route:clear --no-ansi || true && '
+                    .'php artisan view:clear --no-ansi || true && '
+                    .'php artisan event:clear --no-ansi || true && '
+                    .'php artisan queue:restart --no-ansi || true && '
+                    ."echo 'All Laravel caches cleared.'",
+            ],
+            // Kept for backwards compatibility with any existing wire:click
+            // references that still send the old key. Maps to the same
+            // clear-all behaviour so callers do not break silently.
             'clear-config-and-cache' => [
-                'label' => 'config:clear && cache:clear',
-                'command' => 'php artisan config:clear --no-ansi && php artisan cache:clear --no-ansi',
-            ],
-            'config-cache' => [
-                'label' => 'config:cache',
-                'command' => 'php artisan config:cache --no-ansi',
-            ],
-            'queue-restart' => [
-                'label' => 'queue:restart',
-                'command' => 'php artisan queue:restart --no-ansi',
-            ],
-            'queue-work-once' => [
-                'label' => 'queue:work --stop-when-empty',
-                'command' => 'php artisan queue:work --queue="${SERVICE_LARAVEL_QUEUE_NAMES:-default}" --stop-when-empty --tries=3 --timeout=600 --no-ansi',
+                'label' => 'clear all',
+                'command' =>
+                    'php artisan optimize:clear --no-ansi || true && '
+                    .'php artisan config:clear --no-ansi || true && '
+                    .'php artisan cache:clear --no-ansi || true && '
+                    .'php artisan route:clear --no-ansi || true && '
+                    .'php artisan view:clear --no-ansi || true && '
+                    .'php artisan event:clear --no-ansi || true && '
+                    ."echo 'All Laravel caches cleared.'",
             ],
         ];
 

@@ -46,35 +46,11 @@
                     </x-forms.button>
                     <x-forms.button
                         type="button"
-                        wire:click="runLaravelMaintenanceCommand('clear-config-and-cache')"
+                        wire:click="runLaravelMaintenanceCommand('clear-all')"
                         wire:loading.attr="disabled"
-                        wire:target="runLaravelMaintenanceCommand('clear-config-and-cache')"
+                        wire:target="runLaravelMaintenanceCommand('clear-all')"
                     >
-                        Clear config/cache
-                    </x-forms.button>
-                    <x-forms.button
-                        type="button"
-                        wire:click="runLaravelMaintenanceCommand('config-cache')"
-                        wire:loading.attr="disabled"
-                        wire:target="runLaravelMaintenanceCommand('config-cache')"
-                    >
-                        Config cache
-                    </x-forms.button>
-                    <x-forms.button
-                        type="button"
-                        wire:click="runLaravelMaintenanceCommand('queue-restart')"
-                        wire:loading.attr="disabled"
-                        wire:target="runLaravelMaintenanceCommand('queue-restart')"
-                    >
-                        Queue restart
-                    </x-forms.button>
-                    <x-forms.button
-                        type="button"
-                        wire:click="runLaravelMaintenanceCommand('queue-work-once')"
-                        wire:loading.attr="disabled"
-                        wire:target="runLaravelMaintenanceCommand('queue-work-once')"
-                    >
-                        Run queue worker
+                        Clear Cache All
                     </x-forms.button>
                 @endif
             @endcan

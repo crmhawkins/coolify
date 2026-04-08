@@ -12,10 +12,16 @@ it('reports deployed commits and focused failure stages in rootkit stack actions
         ->toContain('Migrations completed successfully with no warnings.')
         ->toContain('Failed at: php artisan migrate --force')
         ->toContain('runLaravelMaintenanceCommand')
-        ->toContain("'clear-config-and-cache'")
-        ->toContain("'config-cache'")
-        ->toContain("'queue-restart'")
-        ->toContain("'queue-work-once'");
+        // The stack heading now exposes a single unified "Clear Cache All"
+        // action instead of the previous config-cache / queue-restart /
+        // queue-work-once buttons. The single entry still runs the same
+        // php artisan config:clear + cache:clear combo plus route/view/event
+        // cleanup inside the container.
+        ->toContain("'clear-all'")
+        ->toContain('php artisan config:clear')
+        ->toContain('php artisan cache:clear')
+        ->toContain('php artisan route:clear')
+        ->toContain('php artisan view:clear');
 });
 
 it('configures laravel rootkit to use file cache and guarded schedule run mode', function () {
