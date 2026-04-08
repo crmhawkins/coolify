@@ -19,93 +19,160 @@
                 href="{{ route('project.service.laravel-cron', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Laravel Cron</span></a>
         </div>
 
-        <div class="flex w-full flex-col overflow-x-hidden gap-6">
-            <div class="rounded-lg border border-coolgray-300 bg-white px-5 py-4 text-black shadow-sm">
-                <h2 class="text-xl font-bold !text-black" style="color: #000000;">Laravel Scheduler (Cron)</h2>
-            </div>
+        {{-- Same lesson we learned on the Artisan page: NO overflow-x-hidden
+             on the wrapper, use min-w-0 instead so the dropdown / card grid
+             can expand without being clipped by an implicit overflow-y. --}}
+        <div class="w-full min-w-0 flex flex-col gap-6">
+            {{-- Page header with title, scheduler health and reload action --}}
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h2 class="text-xl font-bold dark:text-white">Laravel Scheduler</h2>
+                    <div class="subtitle">Tareas programadas del contenedor Laravel.</div>
+                </div>
+                <div class="flex items-center gap-3">
+                    @if ($schedulerStatus === 'Running')
+                        <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
+                              style="background-color:#dcfce7;color:#166534;">
+                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#16a34a;"></span>
+                            Scheduler activo
+                        </span>
+                    @elseif ($schedulerStatus === 'Stopped')
+                        <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
+                              style="background-color:#fee2e2;color:#991b1b;">
+                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#dc2626;"></span>
+                            Scheduler detenido
+                        </span>
+                    @else
+                        <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
+                              style="background-color:#fef3c7;color:#92400e;">
+                            <span class="inline-block w-2 h-2 rounded-full" style="background-color:#d97706;"></span>
+                            Estado desconocido
+                        </span>
+                    @endif
 
-            <div class="box-without-bg">
-                <div class="w-full">
-                @if (empty($laravelContainers))
-                    <div class="rounded-lg border border-coolgray-200 bg-white p-4 text-sm text-black">
-                        No Laravel containers detected in this service.
-                    </div>
-                @else
-                    <div class="box-without-bg-without-border rounded-xl border border-coolgray-300 bg-white p-6 text-black shadow-sm">
-                        <div class="rounded-lg border border-coolgray-300 bg-white p-4 text-black">
-                            <div class="mb-3 mt-2 flex items-center justify-between">
-                                <h3 class="font-semibold !text-black" style="color: #000000;">Tareas programadas</h3>
-                                <x-forms.button
-                                    wire:click="loadScheduleList"
-                                    wire:loading.attr="disabled"
-                                    wire:target="loadScheduleList"
-                                    class="border border-black bg-white text-black hover:bg-white hover:text-black">
-                                    Recargar
-                                </x-forms.button>
-                            </div>
-
-                            @if ($isLoadingScheduleList)
-                                <div class="rounded-md border border-coolgray-200 bg-white p-4 text-sm text-black">
-                                    Cargando schedule list...
-                                </div>
-                            @elseif (empty($scheduledTasks))
-                                <div class="rounded-md border border-coolgray-200 bg-white p-4 text-sm text-black">
-                                    No hay tareas programadas detectadas.
-                                </div>
-                            @else
-                                <div class="space-y-4 rounded-lg border border-coolgray-300 bg-white p-4">
-                                    @foreach ($scheduledTasks as $taskIndex => $task)
-                                        <div class="rounded-lg border border-coolgray-300 bg-white p-4 text-black">
-                                            <div class="mb-4 grid gap-3 lg:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
-                                                <div class="min-w-0">
-                                                    <div class="mb-1 text-xs font-semibold uppercase tracking-wide text-black">Command</div>
-                                                    <div class="font-mono text-sm whitespace-pre-wrap break-words text-black">{{ $task['command'] }}</div>
-                                                </div>
-                                                <div class="min-w-0">
-                                                    <div class="mb-1 text-xs font-semibold uppercase tracking-wide text-black">Intervalo</div>
-                                                    <div class="font-mono text-sm whitespace-pre-wrap break-words text-black">{{ $task['expression'] }}</div>
-                                                </div>
-                                                <div class="min-w-0">
-                                                    <div class="mb-1 text-xs font-semibold uppercase tracking-wide text-black">Origen</div>
-                                                    <div class="text-sm whitespace-pre-wrap break-words text-black">{{ $task['description'] }}</div>
-                                                </div>
-                                                <div class="flex items-start lg:justify-end">
-                                                    <x-forms.button
-                                                        wire:click="executeTaskNow({{ $taskIndex }})"
-                                                        wire:loading.attr="disabled"
-                                                        wire:target="executeTaskNow"
-                                                        class="border border-black bg-white text-black hover:bg-white hover:text-black">
-                                                        Ejecutar ahora
-                                                    </x-forms.button>
-                                                </div>
-                                            </div>
-
-                                            <div class="grid gap-3 sm:grid-cols-2">
-                                                <div class="rounded-md border border-coolgray-200 bg-white p-3">
-                                                    <div class="mb-1 text-xs font-semibold uppercase tracking-wide text-black">Próxima</div>
-                                                    <div class="text-sm whitespace-pre-wrap break-words text-black">{{ $task['next_due'] }}</div>
-                                                </div>
-                                                <div class="rounded-md border border-coolgray-200 bg-white p-3">
-                                                    <div class="mb-1 text-xs font-semibold uppercase tracking-wide text-black">Última</div>
-                                                    <div class="text-sm whitespace-pre-wrap break-words text-black">{{ $task['last_run'] }}</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    @endforeach
-                                </div>
-                            @endif
-
-                            <div class="mt-6">
-                                <div class="mb-2 text-sm font-medium text-black">Salida:</div>
-                                <pre class="min-h-32 w-full whitespace-pre-wrap break-words rounded border border-coolgray-300 bg-white px-4 py-3 font-mono text-sm text-black">{{ $schedulerOutput }}</pre>
-                            </div>
-                        </div>
-                    </div>
-                @endif
+                    <x-forms.button
+                        wire:click="loadScheduleList"
+                        wire:loading.attr="disabled"
+                        wire:target="loadScheduleList"
+                    >
+                        <span wire:loading.remove wire:target="loadScheduleList">Recargar</span>
+                        <span wire:loading wire:target="loadScheduleList">Cargando…</span>
+                    </x-forms.button>
                 </div>
             </div>
+
+            @if (empty($laravelContainers))
+                <div class="rounded border border-coolgray-300 dark:border-coolgray-700 p-4 text-sm text-neutral-500">
+                    No Laravel containers detected in this service.
+                </div>
+            @else
+                @if ($isLoadingScheduleList)
+                    <div class="rounded border border-dashed border-coolgray-300 dark:border-coolgray-600 px-4 py-10 text-center text-sm text-neutral-500">
+                        Cargando schedule list…
+                    </div>
+                @elseif (empty($scheduledTasks))
+                    <div class="rounded border border-dashed border-coolgray-300 dark:border-coolgray-600 px-4 py-10 text-center text-sm text-neutral-500">
+                        No hay tareas programadas detectadas. Asegúrate de que el contenedor Laravel está corriendo y que la aplicación define schedules en <code>routes/console.php</code> o <code>app/Console/Kernel.php</code>.
+                    </div>
+                @else
+                    <div class="text-xs text-neutral-500">
+                        {{ count($scheduledTasks) }} {{ count($scheduledTasks) === 1 ? 'tarea programada' : 'tareas programadas' }}
+                    </div>
+
+                    {{-- Card grid: 1 column on mobile, 2 on md+, stays
+                         readable and compact even when there are 15-20
+                         tasks like in the Apartamentos project. --}}
+                    <div class="grid gap-3 md:grid-cols-2">
+                        @foreach ($scheduledTasks as $taskIndex => $task)
+                            <div
+                                class="rounded-lg border shadow-sm"
+                                style="background-color:#ffffff;border-color:#e5e7eb;color:#0b1220;"
+                            >
+                                {{-- Card header: command name + run button --}}
+                                <div class="flex items-start justify-between gap-3 px-4 pt-3">
+                                    <div class="flex items-center gap-2 min-w-0">
+                                        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#0b1220;">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                                        </svg>
+                                        <span class="font-mono text-sm font-semibold truncate" style="color:#0b1220;" title="{{ $task['command'] }}">
+                                            {{ $task['command'] ?: '—' }}
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        wire:click="executeTaskNow({{ $taskIndex }})"
+                                        wire:loading.attr="disabled"
+                                        wire:target="executeTaskNow({{ $taskIndex }})"
+                                        class="shrink-0 rounded px-2.5 py-1 text-xs font-semibold transition-opacity hover:opacity-80"
+                                        style="background-color:#0b1220;color:#ffffff;"
+                                    >
+                                        <span wire:loading.remove wire:target="executeTaskNow({{ $taskIndex }})">Ejecutar</span>
+                                        <span wire:loading wire:target="executeTaskNow({{ $taskIndex }})">…</span>
+                                    </button>
+                                </div>
+
+                                {{-- Card body: badges for interval + next run --}}
+                                <div class="flex flex-wrap items-center gap-2 px-4 py-3">
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono"
+                                        style="background-color:#f3f4f6;color:#374151;"
+                                        title="Expresión cron"
+                                    >
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                        </svg>
+                                        {{ $task['expression'] ?: '—' }}
+                                    </span>
+                                    @if (! empty($task['next_due']))
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs"
+                                            style="background-color:#dbeafe;color:#1e40af;"
+                                            title="Próxima ejecución"
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                                            </svg>
+                                            Próxima: {{ $task['next_due'] }}
+                                        </span>
+                                    @endif
+                                    @if (! empty($task['last_run']))
+                                        <span
+                                            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs"
+                                            style="background-color:#ecfccb;color:#3f6212;"
+                                            title="Última ejecución"
+                                        >
+                                            Última: {{ $task['last_run'] }}
+                                        </span>
+                                    @endif
+                                </div>
+
+                                {{-- Card footer: origin / description if set --}}
+                                @if (! empty($task['description']))
+                                    <div
+                                        class="border-t px-4 py-2 text-xs font-mono truncate"
+                                        style="border-color:#e5e7eb;color:#6b7280;"
+                                        title="{{ $task['description'] }}"
+                                    >
+                                        {{ $task['description'] }}
+                                    </div>
+                                @endif
+                            </div>
+                        @endforeach
+                    </div>
+                @endif
+
+                {{-- Output panel: shown only when a task execution produces
+                     something, or the source-level fallback has a message --}}
+                @if (! empty($schedulerOutput))
+                    <div class="w-full">
+                        <div class="mb-2 text-sm font-medium dark:text-white">Salida:</div>
+                        <pre
+                            class="w-full whitespace-pre-wrap break-words border rounded px-4 py-3 text-sm font-mono min-h-[8rem] max-h-[40vh] overflow-auto"
+                            style="background-color:#ffffff;color:#0b1220;border-color:#e5e7eb;"
+                        >{{ $schedulerOutput }}</pre>
+                    </div>
+                @endif
+            @endif
         </div>
     </div>
 </div>
-
-{{-- resync-marker 2026-04-08 --}}

@@ -342,6 +342,57 @@ class LaravelCron extends Component
             }
         }
 
+        // Modern Laravel plain-text schedule:list format. Output lines look
+        // like:
+        //   *    *    * * *   php artisan reservas:check-overlaps   Next Due: en 29 segundos
+        //   0    8    1 * *   php artisan vacacioner:add ..........  Next Due: en 3 semanas
+        //   *    *    * * *   Closure at: app/Console/Kernel.php:77  Next Due: en 29 segundos
+        //
+        // Columns are: <5 cron fields> <command or "Closure at: file:line">
+        // <padding dots> Next Due: <relative time>. We capture them with a
+        // single regex and clean the dot padding in PHP.
+        $modernResult = [];
+        foreach (preg_split('/\r?\n/', $raw) ?: [] as $line) {
+            if (! preg_match(
+                '/^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+?)\s+Next Due:\s*(.+?)\s*$/',
+                $line,
+                $m
+            )) {
+                continue;
+            }
+
+            $expression = trim("{$m[1]} {$m[2]} {$m[3]} {$m[4]} {$m[5]}");
+            // Strip trailing dot padding Laravel inserts for visual alignment.
+            $command = rtrim(trim((string) $m[6]), '. ');
+            $nextDue = trim((string) $m[7]);
+
+            // Skip the header line if `schedule:list` decides to emit one.
+            if (stripos($command, 'command') !== false && stripos($expression, 'expression') !== false) {
+                continue;
+            }
+
+            $description = '';
+            // If the command row is actually a `Closure at: path:line` marker,
+            // promote the path to the description so the card shows the origin
+            // and keep the command column as just "Closure".
+            if (preg_match('/^Closure at:\s*(.+)$/i', $command, $cm)) {
+                $description = trim($cm[1]);
+                $command = 'Closure';
+            }
+
+            $modernResult[] = [
+                'command' => $command,
+                'expression' => $expression,
+                'next_due' => $nextDue,
+                'last_run' => '',
+                'description' => $description,
+            ];
+        }
+
+        if ($modernResult !== []) {
+            return $modernResult;
+        }
+
         // Plain output fallback: Symfony table usually contains `|` separators.
         $lines = preg_split('/\r?\n/', $raw);
         $header = null;

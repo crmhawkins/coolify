@@ -80,9 +80,19 @@ it('loads cron tasks from artisan schedule list or project source fallback', fun
         ->toContain('php artisan schedule:list --json --no-interaction')
         ->toContain('parseScheduleSourceOutput')
         ->toContain('Showing schedule definitions detected in project source')
-        ->toContain('sanitizeScheduleCommandOutput');
+        ->toContain('sanitizeScheduleCommandOutput')
+        // Modern Laravel plain-text schedule:list parser lives in the same
+        // method as the JSON / Symfony-table parsers. Lock the regex
+        // signature so future refactors do not silently drop it.
+        ->toContain('Next Due:');
 
     expect($cronView)
-        ->toContain('Origen')
-        ->toContain('text-black');
+        // The card-based redesign uses a scheduler status badge and a
+        // responsive grid. Lock these identifiers so future refactors
+        // cannot silently strip them out.
+        ->toContain('Scheduler activo')
+        ->toContain('Scheduler detenido')
+        ->toContain('md:grid-cols-2')
+        ->toContain('Próxima')
+        ->toContain('executeTaskNow');
 });
