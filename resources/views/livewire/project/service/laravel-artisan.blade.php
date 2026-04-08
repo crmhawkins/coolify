@@ -19,13 +19,16 @@
                 href="{{ route('project.service.laravel-cron', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Laravel Cron</span></a>
         </div>
 
-        {{-- IMPORTANT: explicit flex-col here. The previous markup used the
-             .box-without-bg utility which applies `flex` without
-             `flex-col`, so the input row and the output block ended up
-             side-by-side on the same horizontal flex line. Using an
-             explicit w-full / flex-col container fixes that once and for
-             all regardless of what the utility class does. --}}
-        <div class="w-full flex flex-col gap-6 overflow-x-hidden">
+        {{-- IMPORTANT: this wrapper must NOT set overflow-x-hidden (or any
+             other overflow value). Per the CSS spec, when overflow-x is
+             not `visible`, the browser automatically clamps overflow-y
+             to match, and any absolutely-positioned descendant (like
+             the suggestions dropdown below the command input) gets
+             clipped at the wrapper's box — which is exactly what made
+             only 5-6 of the 10 popular commands visible in the live
+             installation. Use min-w-0 on the wrapper instead so long
+             strings inside .input still shrink to fit. --}}
+        <div class="w-full min-w-0 flex flex-col gap-6">
             <h2 class="text-xl font-bold dark:text-white">Artisan Commands</h2>
 
             @if (empty($laravelContainers))
