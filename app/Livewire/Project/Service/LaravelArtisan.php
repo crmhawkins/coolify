@@ -65,6 +65,36 @@ class LaravelArtisan extends Component
         return (string) ($tokens[0] ?? '');
     }
 
+    /**
+     * Hardcoded fallback list of the 10 most useful artisan commands for
+     * day-to-day Laravel maintenance. Used both when the user first clicks
+     * the input (so there is always something to click even before
+     * `artisan list` has finished loading) and when the remote
+     * `artisan list` call fails entirely (container not ready, json
+     * format unsupported, output polluted with warnings, etc).
+     *
+     * @return array<int, array{name: string, description: string}>
+     */
+    private function defaultPopularCommands(): array
+    {
+        return [
+            ['name' => 'migrate --force', 'description' => 'Aplicar migraciones pendientes en producción'],
+            ['name' => 'migrate:status', 'description' => 'Ver el estado de las migraciones'],
+            ['name' => 'optimize:clear', 'description' => 'Limpiar todas las cachés (config, route, view, cache, event)'],
+            ['name' => 'cache:clear', 'description' => 'Limpiar la caché de aplicación'],
+            ['name' => 'config:clear', 'description' => 'Limpiar la caché de configuración'],
+            ['name' => 'route:clear', 'description' => 'Limpiar la caché de rutas'],
+            ['name' => 'view:clear', 'description' => 'Limpiar las vistas compiladas'],
+            ['name' => 'route:list', 'description' => 'Mostrar todas las rutas registradas'],
+            ['name' => 'queue:restart', 'description' => 'Señalar a los workers que reinicien tras el próximo job'],
+            ['name' => 'schedule:list', 'description' => 'Listar las tareas programadas del scheduler'],
+            ['name' => 'db:seed --force', 'description' => 'Ejecutar los seeders de la base de datos'],
+            ['name' => 'storage:link', 'description' => 'Crear el symlink public/storage → storage/app/public'],
+            ['name' => 'about', 'description' => 'Mostrar información del entorno Laravel'],
+            ['name' => 'env', 'description' => 'Mostrar el entorno actual (APP_ENV)'],
+        ];
+    }
+
     public function showPopularCommands(): void
     {
         if ($this->isLoadingCommands) {
@@ -77,50 +107,58 @@ class LaravelArtisan extends Component
             return;
         }
 
-        if ($this->artisanCommands === []) {
+        $popularNames = [
+            'migrate',
+            'migrate:status',
+            'optimize:clear',
+            'cache:clear',
+            'config:clear',
+            'route:clear',
+            'view:clear',
+            'route:list',
+            'queue:restart',
+            'schedule:list',
+            'db:seed',
+            'storage:link',
+            'about',
+            'env',
+        ];
+
+        // When artisan list already populated the dropdown, prefer its
+        // entries (they have the real descriptions from the container
+        // and will match whatever version of Laravel is deployed).
+        if ($this->artisanCommands !== []) {
+            $byName = collect($this->artisanCommands)->keyBy('name');
+            $result = [];
+
+            foreach ($popularNames as $name) {
+                $cmd = $byName->get($name);
+                if (is_array($cmd)) {
+                    $result[] = $cmd;
+                }
+            }
+
+            // Pad with any other commands until we have at least 10.
+            if (count($result) < 10) {
+                foreach ($this->artisanCommands as $cmd) {
+                    if (count($result) >= 10) {
+                        break;
+                    }
+                    if (in_array($cmd['name'] ?? '', $popularNames, true)) {
+                        continue;
+                    }
+                    $result[] = $cmd;
+                }
+            }
+
+            $this->filteredArtisanCommands = array_values(array_slice($result, 0, 10));
+
             return;
         }
 
-        $popular = [
-            'env',
-            'about',
-            'migrate',
-            'db:seed',
-            'optimize',
-            'optimize:clear',
-            'config:cache',
-            'config:clear',
-            'cache:clear',
-            'route:list',
-            'queue:work',
-            'schedule:run',
-            'view:clear',
-            'storage:link',
-        ];
-
-        $byName = collect($this->artisanCommands)->keyBy('name');
-        $result = [];
-
-        foreach ($popular as $name) {
-            $cmd = $byName->get($name);
-            if (is_array($cmd)) {
-                $result[] = $cmd;
-            }
-        }
-
-        if (count($result) < 10) {
-            foreach ($this->artisanCommands as $cmd) {
-                if (count($result) >= 10) {
-                    break;
-                }
-                if (in_array($cmd['name'] ?? '', $popular, true)) {
-                    continue;
-                }
-                $result[] = $cmd;
-            }
-        }
-
-        $this->filteredArtisanCommands = array_values(array_slice($result, 0, 10));
+        // Hardcoded fallback — always 10+ entries, always shows something
+        // useful even if artisan list failed or has not run yet.
+        $this->filteredArtisanCommands = array_values(array_slice($this->defaultPopularCommands(), 0, 10));
     }
 
     public function mount(): void
@@ -281,14 +319,23 @@ class LaravelArtisan extends Component
             return;
         }
 
+        // Prefer the real commands loaded from the container; fall back to
+        // the hardcoded popular list if `artisan list` has not populated
+        // the array (container still warming up, json flag unsupported,
+        // output polluted with warnings, etc.). This guarantees the
+        // autocomplete works regardless of remote state.
+        $haystack = $this->artisanCommands !== []
+            ? $this->artisanCommands
+            : $this->defaultPopularCommands();
+
         $q = strtolower($subcommand);
         $startsWith = array_values(array_filter(
-            $this->artisanCommands,
+            $haystack,
             fn (array $cmd) => str_starts_with(strtolower((string) ($cmd['name'] ?? '')), $q)
         ));
 
         $containsElsewhere = array_values(array_filter(
-            $this->artisanCommands,
+            $haystack,
             fn (array $cmd) => ! str_starts_with(strtolower((string) ($cmd['name'] ?? '')), $q)
                 && str_contains(strtolower((string) ($cmd['name'] ?? '')), $q)
         ));
@@ -382,13 +429,48 @@ class LaravelArtisan extends Component
         }
     }
 
+    /**
+     * Look up a command description across both the real artisan list and
+     * the hardcoded popular-commands fallback. Matches exact name first,
+     * then by the leading token of the name (so "migrate --force" in the
+     * fallback still resolves when the user has "migrate" typed).
+     */
+    private function resolveCommandDescription(string $name): string
+    {
+        $name = trim($name);
+        if ($name === '') {
+            return '';
+        }
+
+        $lookup = function (array $haystack, string $needle): ?string {
+            foreach ($haystack as $cmd) {
+                $cmdName = (string) ($cmd['name'] ?? '');
+                if ($cmdName === $needle) {
+                    return (string) ($cmd['description'] ?? '');
+                }
+                $leading = trim((string) (preg_split('/\s+/', $cmdName)[0] ?? ''));
+                if ($leading === $needle) {
+                    return (string) ($cmd['description'] ?? '');
+                }
+            }
+
+            return null;
+        };
+
+        $desc = $lookup($this->artisanCommands, $name);
+        if ($desc !== null) {
+            return $desc;
+        }
+
+        return (string) ($lookup($this->defaultPopularCommands(), $name) ?? '');
+    }
+
     public function selectCommand(string $command): void
     {
         $this->suppressCommandDropdown = true;
         $this->selectedCommand = $command;
         $name = trim((string) ($command ? preg_split('/\s+/', $command)[0] : ''));
-        $selected = collect($this->artisanCommands)->firstWhere('name', $name);
-        $this->selectedCommandDescription = (string) (data_get($selected, 'description', ''));
+        $this->selectedCommandDescription = $this->resolveCommandDescription($name);
         $this->filteredArtisanCommands = [];
     }
 
@@ -409,8 +491,7 @@ class LaravelArtisan extends Component
         }
 
         $subcommand = $this->getArtisanSubcommandToken((string) $value);
-        $selected = collect($this->artisanCommands)->firstWhere('name', $subcommand);
-        $this->selectedCommandDescription = (string) (data_get($selected, 'description', ''));
+        $this->selectedCommandDescription = $this->resolveCommandDescription($subcommand);
         $this->selectedCommandHelp = '';
 
         $this->refreshCommandDropdown();
