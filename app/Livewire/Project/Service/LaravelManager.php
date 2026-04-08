@@ -26,8 +26,6 @@ class LaravelManager extends Component
 
     public ?int $selectedContainerForPhpIni = null;
 
-    public ?int $selectedContainerForCron = null;
-
     public string $envContent = '';
 
     public bool $envFileExists = true;
@@ -37,14 +35,6 @@ class LaravelManager extends Component
     public bool $isLoadingEnv = false;
 
     public bool $isLoadingPhpIni = false;
-
-    public bool $isLoadingCron = false;
-
-    public bool $isSchedulerEnabled = false;
-
-    public string $schedulerStatus = '';
-
-    public string $schedulerOutput = '';
 
     public function mount()
     {
@@ -286,172 +276,6 @@ class LaravelManager extends Component
     {
         // Similar to WordPressManager - simplified version
         $this->dispatch('info', 'PHP INI update functionality coming soon. Use the File Explorer to edit php.ini directly.');
-    }
-
-    public function checkSchedulerStatus()
-    {
-        if (! $this->selectedContainerForCron) {
-            return;
-        }
-
-        $this->isLoadingCron = true;
-        $this->schedulerStatus = '';
-        $this->schedulerOutput = '';
-
-        try {
-            $container = collect($this->laravelContainers)->firstWhere('id', $this->selectedContainerForCron);
-            if (! $container) {
-                $this->dispatch('error', 'Container not found.');
-                $this->isLoadingCron = false;
-
-                return;
-            }
-
-            $application = $container['application'] ?? $this->applications->find($container['id']);
-            if (! $application || ! str($application->status)->contains('running')) {
-                $this->dispatch('error', 'Container is not running.');
-                $this->isLoadingCron = false;
-
-                return;
-            }
-
-            $server = $application->service->server;
-            $containerName = $container['container_name'];
-            $escapedContainer = escapeshellarg($containerName);
-
-            // Check if scheduler process is running
-            $checkCommand = "docker exec {$escapedContainer} sh -c 'ps aux | grep -E \"schedule:(run|work)\" | grep -v grep || echo notfound'";
-            if ($server->isNonRoot()) {
-                $checkCommand = "sudo {$checkCommand}";
-            }
-            $processCheck = trim(instant_remote_process([$checkCommand], $server, false) ?? '');
-
-            // Check supervisor status
-            $supervisorCommand = "docker exec {$escapedContainer} sh -c 'supervisorctl status scheduler 2>/dev/null || echo notfound'";
-            if ($server->isNonRoot()) {
-                $supervisorCommand = "sudo {$supervisorCommand}";
-            }
-            $supervisorStatus = trim(instant_remote_process([$supervisorCommand], $server, false) ?? '');
-
-            if ($processCheck !== 'notfound' || str_contains($supervisorStatus, 'RUNNING')) {
-                $this->isSchedulerEnabled = true;
-                $this->schedulerStatus = 'Running';
-                $this->schedulerOutput = $supervisorStatus ?: 'Scheduler process is running';
-            } else {
-                $this->isSchedulerEnabled = false;
-                $this->schedulerStatus = 'Stopped';
-                $this->schedulerOutput = $supervisorStatus !== '' && $supervisorStatus !== 'notfound'
-                    ? $supervisorStatus
-                    : 'Scheduler is not running';
-            }
-
-            $this->dispatch('success', 'Scheduler status checked.');
-        } catch (\Throwable $e) {
-            $this->dispatch('error', 'Error checking scheduler status: '.$e->getMessage());
-        } finally {
-            $this->isLoadingCron = false;
-        }
-    }
-
-    public function toggleScheduler()
-    {
-        if (! $this->selectedContainerForCron) {
-            return;
-        }
-
-        try {
-            $container = collect($this->laravelContainers)->firstWhere('id', $this->selectedContainerForCron);
-            if (! $container) {
-                $this->dispatch('error', 'Container not found.');
-
-                return;
-            }
-
-            $application = $container['application'] ?? $this->applications->find($container['id']);
-            if (! $application || ! str($application->status)->contains('running')) {
-                $this->dispatch('error', 'Container is not running.');
-
-                return;
-            }
-
-            $server = $application->service->server;
-            $containerName = $container['container_name'];
-            $escapedContainer = escapeshellarg($containerName);
-
-            if ($this->isSchedulerEnabled) {
-                // Stop scheduler
-                $command = "docker exec {$escapedContainer} supervisorctl stop scheduler";
-                if ($server->isNonRoot()) {
-                    $command = "sudo {$command}";
-                }
-                instant_remote_process([$command], $server, false);
-                $this->isSchedulerEnabled = false;
-                $this->schedulerStatus = 'Stopped';
-                $this->dispatch('success', 'Scheduler stopped.');
-            } else {
-                // Start scheduler
-                $command = "docker exec {$escapedContainer} supervisorctl start scheduler";
-                if ($server->isNonRoot()) {
-                    $command = "sudo {$command}";
-                }
-                instant_remote_process([$command], $server, false);
-                $this->isSchedulerEnabled = true;
-                $this->schedulerStatus = 'Running';
-                $this->dispatch('success', 'Scheduler started.');
-            }
-
-            // Refresh status
-            $this->checkSchedulerStatus();
-        } catch (\Throwable $e) {
-            $this->dispatch('error', 'Error toggling scheduler: '.$e->getMessage());
-        }
-    }
-
-    public function runScheduler()
-    {
-        if (! $this->selectedContainerForCron) {
-            return;
-        }
-
-        try {
-            $container = collect($this->laravelContainers)->firstWhere('id', $this->selectedContainerForCron);
-            if (! $container) {
-                $this->dispatch('error', 'Container not found.');
-
-                return;
-            }
-
-            $application = $container['application'] ?? $this->applications->find($container['id']);
-            if (! $application || ! str($application->status)->contains('running')) {
-                $this->dispatch('error', 'Container is not running.');
-
-                return;
-            }
-
-            $server = $application->service->server;
-            $containerName = $container['container_name'];
-            $escapedContainer = escapeshellarg($containerName);
-
-            $command = "docker exec {$escapedContainer} sh -lc "
-                .escapeshellarg(
-                    "cd /var/www/html && php artisan optimize:clear >/dev/null 2>&1 || true; "
-                    ."php artisan config:clear >/dev/null 2>&1 || true; "
-                    ."echo 'Scheduler execution context:'; "
-                    .'echo "APP_ENV=${APP_ENV:-}"; '
-                    .'echo "CACHE_STORE=${CACHE_STORE:-}"; '
-                    .'echo "QUEUE_CONNECTION=${QUEUE_CONNECTION:-}"; '
-                    ."php artisan schedule:run --verbose --no-interaction"
-                );
-            if ($server->isNonRoot()) {
-                $command = "sudo {$command}";
-            }
-            $output = instant_remote_process([$command], $server, false) ?? '';
-            $this->schedulerOutput = $output;
-            $this->dispatch('success', 'Scheduler executed successfully.');
-        } catch (\Throwable $e) {
-            $this->dispatch('error', 'Error running scheduler: '.$e->getMessage());
-            $this->schedulerOutput = $e->getMessage();
-        }
     }
 
     public function render()
