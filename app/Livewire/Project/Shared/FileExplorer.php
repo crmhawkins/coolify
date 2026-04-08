@@ -1,5 +1,14 @@
 <?php
 
+// Touched 2026-04-08 to force the copy.sh deploy script to re-sync this file
+// into the live coolify container, after we discovered the container had
+// drifted from the host repository (the file existed in /data/coolify/source
+// but was missing inside /var/www/html, so route registration crashed with
+// "Invalid route action: [App\Livewire\Project\Shared\FileExplorer]").
+// Safe to delete this comment block whenever the deploy pipeline is fixed
+// to copy the entire app/ tree on every deploy instead of just the latest
+// commit's diff.
+
 namespace App\Livewire\Project\Shared;
 
 use App\Models\Application;
