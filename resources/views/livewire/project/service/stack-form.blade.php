@@ -119,7 +119,13 @@
             </x-forms.button>
         </div>
     @endif
-    @if ($this->isLaravelRootkitStack() && $fields->has('SERVICE_GITHUB_TOKEN'))
+    {{-- GitHub Token is only exposed to non-client users. Clients
+         must not even see the password field because a `type=password`
+         input still ships the value to the DOM, and the whole
+         SERVICE_GITHUB_TOKEN entry is also stripped from $fields in
+         StackForm::syncData() when the actor is a client, so there
+         is nothing to inspect in Livewire's state snapshot either. --}}
+    @if ($this->isLaravelRootkitStack() && $fields->has('SERVICE_GITHUB_TOKEN') && ! auth()->user()?->isClient())
         <div class="w-full max-w-sm">
             <x-forms.input canGate="update" :canResource="$service" type="password" id="fields.SERVICE_GITHUB_TOKEN.value"
                 label="GitHub Token"

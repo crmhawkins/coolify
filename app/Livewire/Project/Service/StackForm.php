@@ -164,7 +164,14 @@ class StackForm extends Component
             ]);
             $this->validationAttributes['fields.SERVICE_GITHUB_BRANCH.value'] = 'Git Branch';
         }
-        if ($this->isLaravelRootkitStack() && ! $this->fields->has('SERVICE_GITHUB_TOKEN')) {
+        // GitHub token handling: the value is considered sensitive and
+        // must NEVER reach a client user's browser. Hiding the input
+        // via a blade @if is not enough — Livewire serialises $fields
+        // into a state snapshot that the client can inspect in the
+        // DOM. So we skip loading the token entirely for clients: no
+        // pivot entry in $fields means no value in the snapshot means
+        // no leak even under DevTools.
+        if ($this->isLaravelRootkitStack() && ! $this->fields->has('SERVICE_GITHUB_TOKEN') && ! auth()->user()?->isClient()) {
             $githubToken = $this->service->environment_variables()
                 ->where('key', 'SERVICE_GITHUB_TOKEN')
                 ->first();
@@ -246,6 +253,15 @@ class StackForm extends Component
 
     public function saveGithubToken(): void
     {
+        // Clients can neither see nor write the token. The submit()
+        // call would actually persist whatever value Livewire received
+        // even if the input is hidden in the view, so we need a hard
+        // guard here. abort(403) is safe because a legitimate caller
+        // will never hit this path.
+        if (auth()->user()?->isClient()) {
+            abort(403, 'Los clientes no pueden modificar el token de GitHub.');
+        }
+
         $this->submit(notify: false);
         $this->dispatch('success', 'GitHub token saved.');
     }
@@ -548,6 +564,17 @@ class StackForm extends Component
 
     public function submit($notify = true)
     {
+        // Clients are never allowed to write the GitHub PAT, no matter
+        // which save action they triggered. syncData() already skips
+        // loading the token into $fields for clients on mount, but a
+        // malicious client could still hand-craft a Livewire payload
+        // that injects a value under SERVICE_GITHUB_TOKEN — Livewire
+        // trusts the client-side state by default. Stripping the key
+        // here closes that gap so saveExtraFields() never sees it.
+        if (auth()->user()?->isClient() && $this->fields && $this->fields->has('SERVICE_GITHUB_TOKEN')) {
+            $this->fields->forget('SERVICE_GITHUB_TOKEN');
+        }
+
         try {
             $this->setFieldValueIfPresent('SERVICE_URL_LARAVEL', '');
             $this->validate();

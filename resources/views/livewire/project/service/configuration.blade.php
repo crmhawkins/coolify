@@ -25,7 +25,12 @@
                     href="{{ route('project.service.laravel-artisan', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Artisan Commands</span></a>
                 <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
                     href="{{ route('project.service.laravel-cron', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Laravel Cron</span></a>
-                @if ($this->hasLaravelRootkit())
+                {{-- Git Source is admin-only: the page exposes the
+                     GitHub PAT and is behind restrict.client middleware
+                     at the route layer. Hide the sub-menu link from
+                     clients so they don't see a tab that 403s if
+                     clicked. --}}
+                @if ($this->hasLaravelRootkit() && ! auth()->user()?->isClient())
                     <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
                         href="{{ route('project.service.laravel-git-source', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Git Source</span></a>
                 @endif

@@ -28,6 +28,17 @@
                     <button>Files</button>
                 </a>
             @endcan
+            {{-- "Clientes" tab: only visible to non-client users.
+                 Clients themselves cannot manage their own permissions,
+                 so the link is hidden from them entirely. The route is
+                 also guarded by the restrict.client middleware as
+                 defense in depth in case someone types the URL. --}}
+            @unless (auth()->user()?->isClient())
+                <a class="{{ request()->routeIs('project.service.clients') ? 'dark:text-white' : '' }}" {{ wireNavigate() }}
+                    href="{{ route('project.service.clients', $parameters) }}">
+                    <button>Clientes</button>
+                </a>
+            @endunless
             <x-services.links :service="$service" />
         </nav>
         @if ($service->isDeployable)

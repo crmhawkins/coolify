@@ -26,6 +26,14 @@ class LaravelGitSource extends Component
 
     public function mount(): void
     {
+        // Route-level restrict.client middleware should already have
+        // rejected client users before reaching mount(), but we add
+        // an explicit 403 here as belt-and-braces: the Git Source page
+        // exposes the GitHub PAT and must never load for clients.
+        if (auth()->user()?->isClient()) {
+            abort(403, 'Los clientes no tienen acceso a la configuración de Git Source.');
+        }
+
         $this->parameters = get_route_parameters();
         // Team scoping: see LaravelManager::mount() for the rationale.
         $this->service = Service::ownedByCurrentTeam()

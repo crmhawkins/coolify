@@ -37,6 +37,7 @@ use App\Livewire\Project\Service\LaravelManager;
 use App\Livewire\Project\Service\LaravelArtisan;
 use App\Livewire\Project\Service\LaravelCron;
 use App\Livewire\Project\Service\LaravelGitSource;
+use App\Livewire\Project\Service\Clients as ServiceClients;
 use App\Livewire\Project\Shared\ExecuteContainerCommand;
 use App\Livewire\Project\Shared\FileExplorer;
 use App\Livewire\Project\Shared\Logs;
@@ -307,7 +308,18 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('/laravel-manager', LaravelManager::class)->name('project.service.laravel-manager');
         Route::get('/laravel-artisan', LaravelArtisan::class)->name('project.service.laravel-artisan');
         Route::get('/laravel-cron', LaravelCron::class)->name('project.service.laravel-cron');
-        Route::get('/laravel-git-source', LaravelGitSource::class)->name('project.service.laravel-git-source');
+        // laravel-git-source exposes the GitHub PAT, so clients are
+        // locked out at the route layer on top of the in-component
+        // check. The page also hides the token input for clients
+        // defense-in-depth in case the middleware is ever removed.
+        Route::get('/laravel-git-source', LaravelGitSource::class)->name('project.service.laravel-git-source')->middleware('restrict.client');
+        // Per-service "Clientes" tab: lets team admins toggle which
+        // scoped client users can see every service in this project.
+        // restrict.client middleware blocks client users themselves
+        // from reaching the page — they cannot manage their own
+        // permissions. Authorization on the action itself is enforced
+        // inside Clients::save() via $this->authorize('update', ...).
+        Route::get('/clients', ServiceClients::class)->name('project.service.clients')->middleware('restrict.client');
         Route::get('/{stack_service_uuid}/backups', ServiceDatabaseBackups::class)->name('project.service.database.backups');
         Route::get('/{stack_service_uuid}/import', ServiceIndex::class)->name('project.service.database.import')->middleware('can.update.resource');
         Route::get('/{stack_service_uuid}', ServiceIndex::class)->name('project.service.index');

@@ -15,8 +15,15 @@
                 href="{{ route('project.service.laravel-artisan', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Artisan Commands</span></a>
             <a class='sub-menu-item' {{ wireNavigate() }}
                 href="{{ route('project.service.laravel-cron', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Laravel Cron</span></a>
-            <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
-                href="{{ route('project.service.laravel-git-source', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Git Source</span></a>
+            {{-- Git Source link is hidden from clients — the whole
+                 page is behind restrict.client middleware already, so
+                 the client would never see the link in the first
+                 place, but the gate is kept for consistency with the
+                 configuration.blade.php sub-menu. --}}
+            @unless (auth()->user()?->isClient())
+                <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
+                    href="{{ route('project.service.laravel-git-source', ['project_uuid' => $parameters['project_uuid'], 'environment_uuid' => $parameters['environment_uuid'], 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Git Source</span></a>
+            @endunless
         </div>
 
         <div class="w-full overflow-x-hidden">
