@@ -577,6 +577,46 @@ Route::middleware(['auth'])->group(function () {
         ]);
     })->name('compression.tasks');
 
+    // Clears completed/failed compression tasks (or every task when the
+    // "all" scope is requested) from the team-wide cache bucket. Called
+    // from the Alpine dropdown so users can dismiss finished archives
+    // without waiting for the 24h TTL to expire. Client users never
+    // reach here — the whole /project group is already gated, and the
+    // dropdown itself is hidden for clients in app.blade.php.
+    Route::post('/compression-tasks/clear', function (\Illuminate\Http\Request $request) {
+        if (auth()->user()?->isClient()) {
+            abort(403, 'Los clientes no pueden gestionar las tareas de compresión.');
+        }
+
+        $teamId = (string) data_get(auth()->user()?->currentTeam(), 'id', '0');
+        $cacheKey = "file-explorer-compression-tasks:{$teamId}";
+        $tasks = \Illuminate\Support\Facades\Cache::get($cacheKey, []);
+        if (! is_array($tasks)) {
+            $tasks = [];
+        }
+
+        // Scope: "done" (default) drops completed+failed rows, "all"
+        // drops everything. Unknown values fall through to "done" so a
+        // typo in the client can never wipe running tasks by accident.
+        $scope = (string) $request->input('scope', 'done');
+
+        $remaining = match ($scope) {
+            'all' => [],
+            default => array_values(array_filter(
+                $tasks,
+                fn ($task) => is_array($task)
+                    && ! in_array((string) data_get($task, 'status', ''), ['completed', 'failed'], true),
+            )),
+        };
+
+        \Illuminate\Support\Facades\Cache::put($cacheKey, $remaining, now()->addDay());
+
+        return response()->json([
+            'tasks' => $remaining,
+            'removed' => count($tasks) - count($remaining),
+        ]);
+    })->name('compression.tasks.clear');
+
 });
 
 Route::any('/{any}', function () {
