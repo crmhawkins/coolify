@@ -116,11 +116,98 @@ class SetupWordPress implements ShouldQueue
 
             // Fix permissions
             $this->fixPermissions($server, $containerName);
+
+            // Seed the recommended php.ini defaults so the user never
+            // sees the stock 2M/8M values. The defaults come from
+            // WordPressManager::WP_PHP_INI_DEFAULTS (single source of
+            // truth — the manual "Aplicar defaults" button in the UI
+            // reads the same constant). We write them as
+            // LocalFileVolume overrides in conf.d/99-custom-*.ini so
+            // they survive redeploys, without touching the base
+            // php.ini or requiring a custom image.
+            $this->seedRecommendedPhpIniDefaults($application, $server, $containerName);
         } catch (\Throwable $e) {
             \Log::error('Failed to setup WordPress container', [
                 'container' => $containerName,
                 'error' => $e->getMessage(),
             ]);
+        }
+    }
+
+    /**
+     * Creates a LocalFileVolume per php.ini directive declared in
+     * WordPressManager::WP_PHP_INI_DEFAULTS and docker-cp's the
+     * content into /usr/local/etc/php/conf.d inside the container.
+     *
+     * Idempotent: if a volume already exists with the same mount
+     * path, we just refresh its content instead of creating a
+     * duplicate row. Safe to run on every redeploy.
+     *
+     * Why not just call WordPressManager::updatePhpIniSetting() per
+     * key? Because that method is a Livewire component action that
+     * depends on session/auth context, and this action runs from the
+     * queue worker without an authenticated user. The LocalFileVolume
+     * model + docker cp flow below is the same underlying mechanism,
+     * just without the Livewire plumbing.
+     */
+    private function seedRecommendedPhpIniDefaults(ServiceApplication $application, $server, string $containerName): void
+    {
+        $defaults = \App\Livewire\Project\Service\WordPressManager::WP_PHP_INI_DEFAULTS;
+        $escapedContainer = escapeshellarg($containerName);
+
+        foreach ($defaults as $key => $value) {
+            try {
+                $fileName = '99-custom-'.$key.'.ini';
+                $mountPath = '/usr/local/etc/php/conf.d/'.$fileName;
+                $content = "{$key} = {$value}\n";
+
+                // Upsert the LocalFileVolume so the override persists
+                // across redeploys — Coolify mounts these as bind
+                // volumes on every start.
+                $volume = \App\Models\LocalFileVolume::firstOrNew([
+                    'resource_type' => \App\Models\ServiceApplication::class,
+                    'resource_id' => $application->id,
+                    'mount_path' => $mountPath,
+                ]);
+                $volume->fs_path = $mountPath;
+                $volume->content = $content;
+                $volume->is_directory = false;
+                $volume->save();
+
+                // Also push the file INTO the running container so
+                // the change takes effect before the next deploy.
+                // Writing via tee + heredoc works for the stock
+                // WordPress image which runs as root internally.
+                $escapedMount = escapeshellarg($mountPath);
+                $b64 = escapeshellarg(base64_encode($content));
+                $writeCmd = "docker exec {$escapedContainer} sh -c 'mkdir -p /usr/local/etc/php/conf.d && echo {$b64} | base64 -d > {$escapedMount}'";
+                if ($server->isNonRoot()) {
+                    $writeCmd = "sudo {$writeCmd}";
+                }
+                instant_remote_process([$writeCmd], $server, false);
+            } catch (\Throwable $e) {
+                \Log::warning('seedRecommendedPhpIniDefaults: per-key failure (non-fatal)', [
+                    'container' => $containerName,
+                    'key' => $key,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Soft reload of PHP-FPM to pick up the new conf.d files
+        // without restarting the container. SIGUSR2 is the canonical
+        // FPM reload signal. `|| true` so a container without
+        // php-fpm (pure CLI WordPress, exotic configurations) does
+        // not fail the whole setup.
+        $reloadCmd = "docker exec {$escapedContainer} sh -lc 'pkill -USR2 php-fpm 2>/dev/null || pkill -USR2 php 2>/dev/null || true'";
+        if ($server->isNonRoot()) {
+            $reloadCmd = "sudo {$reloadCmd}";
+        }
+        try {
+            instant_remote_process([$reloadCmd], $server, false);
+        } catch (\Throwable $e) {
+            // Non-fatal: the conf.d files are on disk, next container
+            // restart picks them up.
         }
     }
 

@@ -347,6 +347,48 @@
                             @php // Defined in app.blade.php already; redefining here as fallback so the animation works even if the layout style block got stripped. @endphp
                             <style>@keyframes ct-spin { to { transform: rotate(360deg); } }</style>
                         @elseif ($selectedContainerForPhpIni && !empty($phpIniSettings))
+                            {{-- "Aplicar defaults WordPress" one-click
+                                 button. Calls applyRecommendedPhpDefaults()
+                                 which loops over the WP_PHP_INI_DEFAULTS
+                                 constant and calls updatePhpIniSetting()
+                                 for each. Shows the preset values so the
+                                 user knows exactly what they're applying. --}}
+                            <div style="border-radius:0.375rem;border:1px solid rgba(139,92,246,0.35);background-color:rgba(139,92,246,0.08);padding:0.75rem 1rem;">
+                                <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;">
+                                    <div style="min-width:0;flex:1 1 0%;">
+                                        <p style="margin:0;font-size:0.8125rem;font-weight:600;color:#c4b5fd;">
+                                            Defaults recomendados para WordPress
+                                        </p>
+                                        <p style="margin:0.25rem 0 0 0;font-size:0.6875rem;color:#a1a1aa;line-height:1.5;">
+                                            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">upload_max_filesize=256M</span> ·
+                                            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">post_max_size=256M</span> ·
+                                            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">memory_limit=512M</span> ·
+                                            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">max_execution_time=300</span> ·
+                                            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">max_input_vars=5000</span>
+                                            — sube las stock 2M / 8M a valores listos para uploads grandes, Elementor y plugins de backup.
+                                        </p>
+                                    </div>
+                                    <div style="flex-shrink:0;">
+                                        <button
+                                            type="button"
+                                            wire:click="applyRecommendedPhpDefaults"
+                                            wire:loading.attr="disabled"
+                                            wire:target="applyRecommendedPhpDefaults"
+                                            wire:confirm="¿Aplicar los defaults recomendados para WordPress a este contenedor? Sobrescribe cualquier valor personalizado que tengas ahora. Es seguro ejecutarlo varias veces."
+                                            style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 0.875rem;border-radius:0.375rem;font-size:0.75rem;font-weight:600;background-color:#8b5cf6;color:#ffffff;border:1px solid #7c3aed;cursor:pointer;box-shadow:0 1px 3px rgba(139,92,246,0.4);"
+                                            onmouseover="this.style.backgroundColor='#7c3aed'"
+                                            onmouseout="this.style.backgroundColor='#8b5cf6'"
+                                        >
+                                            <svg width="14" height="14" style="width:14px;height:14px;flex-shrink:0;display:block;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                            </svg>
+                                            <span wire:loading.remove wire:target="applyRecommendedPhpDefaults">Aplicar defaults WordPress</span>
+                                            <span wire:loading wire:target="applyRecommendedPhpDefaults">Aplicando…</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(16rem, 1fr));gap:0.75rem;" x-data="{
                                 settings: @js($phpIniSettings),
                                 updateSetting(setting, value) {

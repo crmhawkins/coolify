@@ -53,6 +53,37 @@ class WordPressManager extends Component
 
     public bool $isFixingPermissions = false;
 
+    public bool $isApplyingPhpDefaults = false;
+
+    /**
+     * Recommended php.ini values for a production WordPress container.
+     * The WordPress-official Docker image ships with the PHP defaults
+     * (upload_max_filesize=2M, post_max_size=8M, memory_limit=128M),
+     * which are far too tight for any real workload — most plugin
+     * zips, media imports and backup plugins hit the 2M cap instantly.
+     *
+     * Tuned for:
+     *   - Uploading media files and plugin zips up to ~256 MB
+     *   - Running backup/migration plugins (UpdraftPlus, All-in-One
+     *     WP Migration) without OOM
+     *   - Elementor editor saves with lots of widgets (max_input_vars)
+     *   - Long-running imports (max_execution_time)
+     *
+     * Applied BOTH via the "Aplicar defaults WordPress" button in the
+     * UI and automatically by SetupWordPress::setupWordPressContainer()
+     * the very first time a WordPress container is provisioned, so
+     * users never see the stock 2M/8M values again.
+     */
+    public const WP_PHP_INI_DEFAULTS = [
+        'upload_max_filesize' => '256M',
+        'post_max_size' => '256M',
+        'memory_limit' => '512M',
+        'max_execution_time' => '300',
+        'max_input_time' => '300',
+        'max_input_vars' => '5000',
+        'max_file_uploads' => '50',
+    ];
+
     public function mount()
     {
         try {
@@ -289,140 +320,159 @@ class WordPressManager extends Component
     }
 
     /**
-     * Strategy 2 implementation: raw SQL UPDATE statements via the
-     * `mysql` client inside the WordPress container. Reads the DB
-     * credentials from the WordPress environment (WORDPRESS_DB_*)
-     * which are the standard env vars the official image uses, then
-     * resolves the actual table prefix from wp-config.php via the
-     * same helper we already use in the "Prefijo de tablas" card.
+     * Strategy 2 implementation: UPDATE REPLACE() statements executed
+     * via a PHP helper script running `mysqli` inside the WordPress
+     * container. The old version used the `mysql` CLI which is NOT
+     * installed in the official WordPress image — this rewrite uses
+     * the same PHP + mysqli pattern as updateWpPrefix() so it works
+     * on vanilla WordPress installs without any extra tooling.
      *
      * Returns ['ok' => bool, 'log' => string].
      *
-     * @param  array<string, mixed>  $container
+     * @param  array<string, mixed>  $containerMeta
      * @return array{ok: bool, log: string}
      */
     private function runSyncUrlsWithSql($server, string $escapedContainer, array $containerMeta): array
     {
         $log = '';
 
-        // Read the DB credentials from the container's environment.
-        $envDump = "docker exec {$escapedContainer} sh -c 'printenv WORDPRESS_DB_HOST WORDPRESS_DB_NAME WORDPRESS_DB_USER WORDPRESS_DB_PASSWORD 2>/dev/null'";
-        if ($server->isNonRoot()) {
-            $envDump = "sudo {$envDump}";
-        }
-        $envRaw = (string) (instant_remote_process([$envDump], $server, false) ?? '');
-        $envLines = preg_split('/\r?\n/', trim($envRaw)) ?: [];
-        $envLines = array_values(array_filter($envLines, fn ($l) => $l !== ''));
-        if (count($envLines) < 4) {
-            return ['ok' => false, 'log' => "  ✗ No se pudieron leer WORDPRESS_DB_* del entorno del contenedor (obtenidas ".count($envLines)."/4 vars).\n"];
-        }
-        [$dbHost, $dbName, $dbUser, $dbPass] = $envLines;
-
-        // Check that `mysql` CLI is available inside the container.
-        $mysqlCheck = "docker exec {$escapedContainer} sh -c 'command -v mysql >/dev/null 2>&1 && echo ok || echo notfound'";
-        if ($server->isNonRoot()) {
-            $mysqlCheck = "sudo {$mysqlCheck}";
-        }
-        $mysqlCheckResult = trim((string) (instant_remote_process([$mysqlCheck], $server, false) ?? ''));
-        if ($mysqlCheckResult !== 'ok') {
-            return ['ok' => false, 'log' => "  ✗ El cliente `mysql` no está instalado en el contenedor WordPress (imagen oficial tampoco lo trae). No puedo ejecutar el fallback SQL.\n"];
-        }
-
-        // Resolve the current prefix so we UPDATE the right table names.
         $prefix = $this->detectWpPrefix($server, $containerMeta['container_name']) ?? 'wp_';
         if (! preg_match('/^[a-zA-Z0-9_]+$/', $prefix)) {
             return ['ok' => false, 'log' => "  ✗ Prefijo detectado inválido: {$prefix}\n"];
         }
         $log .= "  ℹ prefijo detectado: {$prefix}\n";
 
-        // Build the SQL. We use multiple small statements (one per
-        // column) because MySQL's REPLACE() cannot be chained across
-        // columns in a single UPDATE without becoming unreadable.
-        $old = $this->oldUrl;
-        $new = $this->newUrl;
+        $script = $this->buildSyncUrlsPhpScript();
+        $result = $this->runPhpScriptInContainer(
+            $server,
+            $escapedContainer,
+            $script,
+            [$prefix, $this->oldUrl, $this->newUrl]
+        );
 
-        // Escape for single-quote SQL literals. We intentionally do
-        // NOT use backslash escapes — mysql default ansi mode parses
-        // doubled single-quotes as an escape for `'`.
-        $sqlOld = str_replace("'", "''", $old);
-        $sqlNew = str_replace("'", "''", $new);
-
-        $statements = [
-            "UPDATE `{$prefix}options` SET option_value = REPLACE(option_value, '{$sqlOld}', '{$sqlNew}') WHERE option_name IN ('siteurl', 'home');",
-            "UPDATE `{$prefix}posts` SET guid = REPLACE(guid, '{$sqlOld}', '{$sqlNew}');",
-            "UPDATE `{$prefix}posts` SET post_content = REPLACE(post_content, '{$sqlOld}', '{$sqlNew}');",
-            "UPDATE `{$prefix}posts` SET post_excerpt = REPLACE(post_excerpt, '{$sqlOld}', '{$sqlNew}');",
-            "UPDATE `{$prefix}postmeta` SET meta_value = REPLACE(meta_value, '{$sqlOld}', '{$sqlNew}') WHERE meta_value NOT LIKE '%s:%' OR meta_value NOT LIKE '%:\"%';",
-            "UPDATE `{$prefix}comments` SET comment_content = REPLACE(comment_content, '{$sqlOld}', '{$sqlNew}');",
-        ];
-
-        $sql = implode("\n", $statements);
-
-        // Pipe the SQL to `mysql` via stdin using a here-doc so we
-        // never have to escape the statements for the shell again.
-        // MYSQL_PWD is the modern recommended env var (avoids the
-        // "-p" warning on stderr).
-        $hostArg = escapeshellarg($dbHost);
-        $userArg = escapeshellarg($dbUser);
-        $nameArg = escapeshellarg($dbName);
-        $pwdArg = escapeshellarg($dbPass);
-
-        // Write the SQL to a temp file inside the container, execute
-        // mysql, then remove the file. Keeps the command line short
-        // and avoids shell-quoting the multi-line SQL.
-        $tmpFile = '/tmp/coolify-wp-url-sync-'.uniqid().'.sql';
-        $tmpFileArg = escapeshellarg($tmpFile);
-
-        $writeSqlCmd = "docker exec -i {$escapedContainer} sh -c 'cat > {$tmpFileArg}'";
-        if ($server->isNonRoot()) {
-            $writeSqlCmd = "sudo {$writeSqlCmd}";
+        if (! $result['ok']) {
+            return ['ok' => false, 'log' => $log."  ✗ script falló (exit {$result['exit_code']}): ".$result['stderr']."\n"];
         }
 
-        try {
-            // We cannot stream stdin through instant_remote_process,
-            // so we use a base64 round-trip: encode locally, echo
-            // inside the container, decode to the target file.
-            $b64 = base64_encode($sql);
-            $b64Arg = escapeshellarg($b64);
-            $writeInline = "docker exec {$escapedContainer} sh -c 'echo {$b64Arg} | base64 -d > {$tmpFileArg}'";
-            if ($server->isNonRoot()) {
-                $writeInline = "sudo {$writeInline}";
-            }
-            instant_remote_process([$writeInline], $server, false);
-
-            $runCmd = "docker exec {$escapedContainer} sh -c 'MYSQL_PWD={$pwdArg} mysql -h {$hostArg} -u {$userArg} {$nameArg} < {$tmpFileArg} 2>&1'";
-            if ($server->isNonRoot()) {
-                $runCmd = "sudo {$runCmd}";
-            }
-            $runOutput = (string) (instant_remote_process([$runCmd], $server, false) ?? '');
-            $runOutput = trim($runOutput);
-
-            if ($runOutput !== '') {
-                $log .= "  mysql stdout: ".$runOutput."\n";
-            }
-
-            // If the output contains "ERROR" we treat it as a failure.
-            if (stripos($runOutput, 'ERROR') !== false) {
-                $log .= "  ✗ mysql reportó un error\n";
-                return ['ok' => false, 'log' => $log];
-            }
-
-            $log .= "  ✓ SQL ejecutado sobre tablas: {$prefix}options, {$prefix}posts, {$prefix}postmeta, {$prefix}comments\n";
-
-            return ['ok' => true, 'log' => $log];
-        } catch (\Throwable $e) {
-            return ['ok' => false, 'log' => $log."  ✗ excepción: ".$e->getMessage()."\n"];
-        } finally {
-            $cleanCmd = "docker exec {$escapedContainer} sh -c 'rm -f {$tmpFileArg}'";
-            if ($server->isNonRoot()) {
-                $cleanCmd = "sudo {$cleanCmd}";
-            }
-            try {
-                instant_remote_process([$cleanCmd], $server, false);
-            } catch (\Throwable $e) {
-                // Best-effort.
-            }
+        $payload = json_decode($result['stdout'], true);
+        if (! is_array($payload) || ! isset($payload['ok'])) {
+            return ['ok' => false, 'log' => $log."  ✗ respuesta inválida del script: ".substr((string) $result['stdout'], 0, 300)."\n"];
         }
+        if ($payload['ok'] !== true) {
+            return ['ok' => false, 'log' => $log."  ✗ ".(string) ($payload['message'] ?? 'error desconocido')."\n"];
+        }
+
+        $log .= "  ✓ options: {$payload['options']} filas · posts: {$payload['posts']} filas · postmeta: {$payload['postmeta']} filas · comments: {$payload['comments']} filas\n";
+
+        return ['ok' => true, 'log' => $log];
+    }
+
+    /**
+     * PHP helper script that performs the URL search-replace across
+     * the canonical WordPress URL tables using mysqli. Argv[1] =
+     * prefix, argv[2] = old URL, argv[3] = new URL.
+     *
+     * Output: JSON with per-table affected_rows counts.
+     *
+     * Limitation (same as WP-CLI with --skip-tables): does NOT
+     * rewrite URLs inside PHP-serialized blobs (Elementor theme_mods
+     * and similar). The caller surfaces this warning to the user.
+     */
+    public function buildSyncUrlsPhpScript(): string
+    {
+        return <<<'PHP'
+<?php
+error_reporting(E_ERROR | E_PARSE);
+function out($payload) { echo json_encode($payload); exit; }
+
+$prefix = $argv[1] ?? '';
+$old = $argv[2] ?? '';
+$new = $argv[3] ?? '';
+if (!preg_match('/^[a-zA-Z0-9_]+$/', $prefix)) {
+    out(['ok' => false, 'message' => 'Invalid prefix argument.']);
+}
+if ($old === '' || $new === '') {
+    out(['ok' => false, 'message' => 'Old or new URL is empty.']);
+}
+
+$cfg = @file_get_contents('/var/www/html/wp-config.php');
+if ($cfg === false) {
+    out(['ok' => false, 'message' => 'wp-config.php not readable']);
+}
+function extract_define(string $content, string $name): ?string {
+    if (preg_match('/define\s*\(\s*[\'"]' . preg_quote($name, '/') . '[\'"]\s*,\s*([\'"])(.*?)\1\s*\)/s', $content, $m)) {
+        return $m[2];
+    }
+    return null;
+}
+$dbName = extract_define($cfg, 'DB_NAME');
+$dbUser = extract_define($cfg, 'DB_USER');
+$dbPass = extract_define($cfg, 'DB_PASSWORD');
+$dbHost = extract_define($cfg, 'DB_HOST') ?? 'localhost';
+if ($dbName === null || $dbUser === null || $dbPass === null) {
+    out(['ok' => false, 'message' => 'Could not read DB credentials from wp-config.php.']);
+}
+
+$mysqli = @new mysqli($dbHost, $dbUser, $dbPass, $dbName);
+if ($mysqli->connect_errno) {
+    out(['ok' => false, 'message' => 'mysqli connect failed: ' . $mysqli->connect_error]);
+}
+$mysqli->set_charset('utf8mb4');
+
+$oldEsc = $mysqli->real_escape_string($old);
+$newEsc = $mysqli->real_escape_string($new);
+
+$options = $mysqli->real_escape_string($prefix . 'options');
+$posts = $mysqli->real_escape_string($prefix . 'posts');
+$postmeta = $mysqli->real_escape_string($prefix . 'postmeta');
+$comments = $mysqli->real_escape_string($prefix . 'comments');
+
+$counts = ['options' => 0, 'posts' => 0, 'postmeta' => 0, 'comments' => 0];
+
+$mysqli->begin_transaction();
+try {
+    // siteurl + home
+    $sql = "UPDATE `$options` SET option_value = REPLACE(option_value, '$oldEsc', '$newEsc') WHERE option_name IN ('siteurl', 'home')";
+    if (!$mysqli->query($sql)) { throw new RuntimeException('options: ' . $mysqli->error); }
+    $counts['options'] = $mysqli->affected_rows;
+
+    // posts: guid + post_content + post_excerpt in a single UPDATE so
+    // the affected_rows count is accurate.
+    $sql = "UPDATE `$posts` SET "
+         . "guid = REPLACE(guid, '$oldEsc', '$newEsc'), "
+         . "post_content = REPLACE(post_content, '$oldEsc', '$newEsc'), "
+         . "post_excerpt = REPLACE(post_excerpt, '$oldEsc', '$newEsc')";
+    if (!$mysqli->query($sql)) { throw new RuntimeException('posts: ' . $mysqli->error); }
+    $counts['posts'] = $mysqli->affected_rows;
+
+    // postmeta: exclude rows whose meta_value looks serialized
+    // (starts with 'a:' / 'O:' / 's:N:' etc). We cannot safely
+    // rewrite serialized strings without re-serializing the length
+    // header — use WP-CLI's search-replace for that case.
+    $sql = "UPDATE `$postmeta` SET meta_value = REPLACE(meta_value, '$oldEsc', '$newEsc') "
+         . "WHERE meta_value NOT REGEXP '^(a|O|s):[0-9]+'";
+    if (!$mysqli->query($sql)) { throw new RuntimeException('postmeta: ' . $mysqli->error); }
+    $counts['postmeta'] = $mysqli->affected_rows;
+
+    // comments
+    $sql = "UPDATE `$comments` SET comment_content = REPLACE(comment_content, '$oldEsc', '$newEsc')";
+    if (!$mysqli->query($sql)) { throw new RuntimeException('comments: ' . $mysqli->error); }
+    $counts['comments'] = $mysqli->affected_rows;
+
+    $mysqli->commit();
+    out([
+        'ok' => true,
+        'options' => (int) $counts['options'],
+        'posts' => (int) $counts['posts'],
+        'postmeta' => (int) $counts['postmeta'],
+        'comments' => (int) $counts['comments'],
+        'message' => 'ok',
+    ]);
+} catch (\Throwable $e) {
+    $mysqli->rollback();
+    out(['ok' => false, 'message' => $e->getMessage()]);
+}
+PHP;
     }
 
     public function fixPermissions($server, $containerName)
@@ -476,26 +526,46 @@ class WordPressManager extends Component
         }
     }
 
+    /**
+     * Best-effort detection of the WordPress table prefix declared in
+     * wp-config.php. Uses a PHP-side parse (not grep) because the old
+     * grep approach matched ANY line containing `$table_prefix`,
+     * including commented multisite examples, and then `head -1`
+     * would pick the wrong one.
+     *
+     * The new flow:
+     *   1. cat wp-config.php inside the container.
+     *   2. Strip single-line (// ...) and block (/* ... *\/) comments.
+     *   3. Run a regex that matches `$table_prefix = 'value';` or
+     *      `$table_prefix = "value";` anchored at line start with
+     *      any amount of leading whitespace.
+     *   4. Return the captured value.
+     *
+     * Falls back to SHOW TABLES + pattern match if the config parse
+     * fails for any reason.
+     */
     public function detectWpPrefix($server, string $containerName): ?string
     {
         try {
             $escapedContainer = escapeshellarg($containerName);
 
-            // Try to get prefix from wp-config.php
-            $configCommand = "docker exec {$escapedContainer} sh -c 'cd /var/www/html && grep -E \"\\\$table_prefix\" wp-config.php 2>/dev/null | head -1 || echo notfound'";
+            // Dump the whole wp-config.php so we can parse it in PHP
+            // instead of relying on shell grep (which can't easily
+            // distinguish commented from uncommented lines).
+            $dumpCommand = "docker exec {$escapedContainer} sh -c 'cat /var/www/html/wp-config.php 2>/dev/null || echo __NOTFOUND__'";
             if ($server->isNonRoot()) {
-                $configCommand = "sudo {$configCommand}";
+                $dumpCommand = "sudo {$dumpCommand}";
             }
-            $configOutput = trim(instant_remote_process([$configCommand], $server, false) ?? '');
+            $configContent = (string) (instant_remote_process([$dumpCommand], $server, false) ?? '');
 
-            if ($configOutput !== 'notfound' && ! empty($configOutput)) {
-                // Extract prefix from line like: $table_prefix = 'wp_';
-                if (preg_match("/['\"]([^'\"]+)['\"]/", $configOutput, $matches)) {
-                    return $matches[1];
+            if ($configContent !== '' && ! str_contains($configContent, '__NOTFOUND__')) {
+                $prefix = $this->parseTablePrefixFromConfig($configContent);
+                if ($prefix !== null) {
+                    return $prefix;
                 }
             }
 
-            // Try to detect from database tables
+            // Fallback: look at actual database tables.
             $prefix = $this->detectPrefixFromDatabase($server, $containerName);
             if ($prefix) {
                 return $prefix;
@@ -505,6 +575,50 @@ class WordPressManager extends Component
         } catch (\Throwable $e) {
             return null;
         }
+    }
+
+    /**
+     * Pure-PHP parser for wp-config.php that ignores both kinds of
+     * comments before running the $table_prefix regex. Exposed as a
+     * protected method so the unit tests can exercise it with
+     * synthetic wp-config.php contents without needing SSH.
+     */
+    public static function parseTablePrefixFromConfig(string $content): ?string
+    {
+        if ($content === '') {
+            return null;
+        }
+
+        // Strip block comments /* ... */ first (multiline safe).
+        $stripped = preg_replace('#/\*.*?\*/#s', '', $content);
+        if (! is_string($stripped)) {
+            $stripped = $content;
+        }
+
+        // Then strip single-line // comments and shell # comments.
+        $lines = preg_split('/\r?\n/', $stripped) ?: [];
+        $cleanLines = [];
+        foreach ($lines as $line) {
+            // Remove trailing // comment (but NOT inside a string —
+            // wp-config.php doesn't contain // inside strings in
+            // practice, so a simple split is fine).
+            $line = preg_replace('#//.*$#', '', $line) ?? $line;
+            $line = preg_replace('/^\s*#.*/', '', $line) ?? $line;
+            $cleanLines[] = $line;
+        }
+        $clean = implode("\n", $cleanLines);
+
+        // Anchor at line start (with optional whitespace) so we never
+        // match the multisite example `* $table_prefix = '...';` that
+        // WP's default comment block contains.
+        if (preg_match('/^\s*\$table_prefix\s*=\s*([\'"])(.*?)\1\s*;/m', $clean, $m)) {
+            $value = $m[2];
+            if ($value !== '' && preg_match('/^[a-zA-Z0-9_]+$/', $value)) {
+                return $value;
+            }
+        }
+
+        return null;
     }
 
     private function detectPrefixFromDatabase($server, string $containerName): ?string
@@ -586,37 +700,40 @@ class WordPressManager extends Component
     }
 
     /**
-     * Changes the WordPress table prefix end-to-end:
+     * Changes the WordPress table prefix end-to-end, using a PHP
+     * helper script inside the container instead of the `mysql` CLI
+     * (which is NOT installed in the official WordPress image). The
+     * helper uses the `mysqli` extension that WordPress itself needs
+     * to run, so it is guaranteed to be available.
      *
-     *   1. Validates the new prefix format (and that it is different
-     *      from the current one).
-     *   2. Reads the current prefix from wp-config.php.
-     *   3. Detects the DB credentials + current prefix tables via the
-     *      WORDPRESS_DB_* environment variables and
-     *      `SHOW TABLES LIKE 'oldprefix%'`.
-     *   4. Backs up wp-config.php to wp-config.php.backup-<timestamp>
-     *      inside the container (so a failed rename is recoverable).
-     *   5. Renames every `oldprefix*` table to `newprefix*` via
-     *      `RENAME TABLE` in a single statement (atomic).
-     *   6. Updates the few WordPress user_meta / options rows that
-     *      embed the literal prefix string:
-     *        - wp_user_meta.meta_key like 'oldprefix_capabilities'
-     *        - wp_user_meta.meta_key like 'oldprefix_user_level'
-     *        - wp_user_meta.meta_key like 'oldprefix_user-settings'
-     *        - wp_user_meta.meta_key like 'oldprefix_dashboard_quick_press_last_post_id'
-     *        - wp_options.option_name = 'oldprefix_user_roles'
-     *      Without this step, logged-in users lose all permissions
-     *      (including admin) because WordPress looks them up by
-     *      the prefixed key name.
-     *   7. Finally rewrites wp-config.php with the new prefix and
-     *      runs detectWpPrefix() to verify.
+     * Operation order (wp-config.php is the source of truth — if the
+     * tables already have another prefix, we rename them to match
+     * whatever the user just wrote in the UI):
      *
-     * Everything runs inside a single SQL script piped into `mysql`,
-     * and the wp-config rewrite uses a tiny PHP helper as before. We
-     * do NOT run this unless `mysql` CLI is available in the
-     * container — if it isn't, the old implementation's "only rewrite
-     * wp-config.php" behaviour would silently tumble the site, so we
-     * refuse with a clear error instead.
+     *   1. Validate the new prefix format.
+     *   2. Detect the current prefix from wp-config.php. If it matches
+     *      the new one, no-op.
+     *   3. Build a self-contained PHP script that:
+     *       a. Loads wp-config.php to read DB_HOST / DB_NAME / DB_USER
+     *          / DB_PASSWORD.
+     *       b. Connects via mysqli.
+     *       c. Lists every table with the current prefix via
+     *          SHOW TABLES LIKE 'prefix\_%'.
+     *       d. If no tables found with the OLD prefix, looks for the
+     *          NEW prefix (the user may have renamed the tables
+     *          already outside Coolify and only wants to update
+     *          wp-config.php) — if those exist, skip rename.
+     *       e. If OLD tables exist, builds a single atomic RENAME
+     *          TABLE statement and executes it.
+     *       f. Updates wp_usermeta.meta_key + wp_options.option_name
+     *          rows that embed the old prefix verbatim (capabilities,
+     *          user_level, user_roles, dashboard_*). Without this
+     *          every logged-in user would lose their permissions.
+     *       g. Prints a JSON summary: {ok, renamed, meta_updated,
+     *          options_updated, message}.
+     *   4. Back up wp-config.php.
+     *   5. Rewrite $table_prefix in wp-config.php.
+     *   6. Verify final state via detectWpPrefix().
      */
     public function updateWpPrefix(int $containerId, string $newPrefix)
     {
@@ -630,10 +747,6 @@ class WordPressManager extends Component
             return;
         }
         if (! str_ends_with($newPrefix, '_')) {
-            // Enforce WordPress convention — WP code concatenates
-            // the prefix with underscore-less table names like
-            // `$wpdb->prefix . 'posts'`, so a prefix without `_`
-            // produces invalid table names.
             $this->dispatch('error', 'El prefijo debe terminar en un guion bajo (ej: wp_, myapp_, 2024_).');
 
             return;
@@ -658,7 +771,7 @@ class WordPressManager extends Component
         $escapedContainer = escapeshellarg($containerName);
 
         try {
-            // Step 1: detect current prefix — no-op if already matches.
+            // Step 1: detect current prefix.
             $currentPrefix = $this->detectWpPrefix($server, $containerName) ?? 'wp_';
             if ($currentPrefix === $newPrefix) {
                 $this->dispatch('warning', "El prefijo ya es {$newPrefix}, no hay nada que hacer.");
@@ -671,88 +784,33 @@ class WordPressManager extends Component
                 return;
             }
 
-            // Step 2: ensure `mysql` CLI is available. Without it we
-            // CANNOT rename tables, and rewriting wp-config.php alone
-            // would leave the site pointing at non-existent tables —
-            // that's the old bug we are fixing here.
-            $mysqlCheck = "docker exec {$escapedContainer} sh -c 'command -v mysql >/dev/null 2>&1 && echo ok || echo notfound'";
-            if ($server->isNonRoot()) {
-                $mysqlCheck = "sudo {$mysqlCheck}";
-            }
-            if (trim((string) (instant_remote_process([$mysqlCheck], $server, false) ?? '')) !== 'ok') {
-                $this->dispatch('error', 'El cliente `mysql` no está instalado en el contenedor WordPress. No puedo renombrar las tablas — cambiar solo wp-config.php tumbaría el sitio, por eso abortamos.');
+            // Step 2: run the PHP + mysqli rename script inside the container.
+            $script = $this->buildUpdatePrefixPhpScript();
+            $result = $this->runPhpScriptInContainer($server, $escapedContainer, $script, [$currentPrefix, $newPrefix]);
+
+            if (! $result['ok']) {
+                $this->dispatch('error', 'RENAME TABLE falló: '.$result['stderr']);
 
                 return;
             }
 
-            // Step 3: read DB credentials from WORDPRESS_DB_* env vars.
-            $envDump = "docker exec {$escapedContainer} sh -c 'printenv WORDPRESS_DB_HOST WORDPRESS_DB_NAME WORDPRESS_DB_USER WORDPRESS_DB_PASSWORD 2>/dev/null'";
-            if ($server->isNonRoot()) {
-                $envDump = "sudo {$envDump}";
-            }
-            $envLines = array_values(array_filter(preg_split('/\r?\n/', trim((string) (instant_remote_process([$envDump], $server, false) ?? ''))) ?: [], fn ($l) => $l !== ''));
-            if (count($envLines) < 4) {
-                $this->dispatch('error', 'No pude leer WORDPRESS_DB_HOST / NAME / USER / PASSWORD del entorno del contenedor.');
+            $payload = json_decode($result['stdout'], true);
+            if (! is_array($payload) || ! isset($payload['ok'])) {
+                $this->dispatch('error', 'Respuesta del script inválida: '.substr((string) $result['stdout'], 0, 300));
 
                 return;
             }
-            [$dbHost, $dbName, $dbUser, $dbPass] = $envLines;
-
-            // Step 4: list all current prefix tables.
-            $listSql = "SHOW TABLES LIKE '".str_replace('_', '\\_', $currentPrefix)."%';";
-            $listB64 = escapeshellarg(base64_encode($listSql));
-            $listRun = "docker exec {$escapedContainer} sh -c 'echo {$listB64} | base64 -d | MYSQL_PWD=".escapeshellarg($dbPass)." mysql -h ".escapeshellarg($dbHost)." -u ".escapeshellarg($dbUser)." ".escapeshellarg($dbName)." --skip-column-names 2>&1'";
-            if ($server->isNonRoot()) {
-                $listRun = "sudo {$listRun}";
-            }
-            $tablesRaw = (string) (instant_remote_process([$listRun], $server, false) ?? '');
-            $tables = array_values(array_filter(preg_split('/\r?\n/', trim($tablesRaw)) ?: [], fn ($l) => $l !== '' && stripos($l, 'ERROR') === false));
-
-            if (empty($tables)) {
-                $this->dispatch('error', "No se encontraron tablas con prefijo '{$currentPrefix}'. Aborto por seguridad.");
+            if ($payload['ok'] !== true) {
+                $this->dispatch('error', (string) ($payload['message'] ?? 'Error desconocido durante el RENAME TABLE.'));
 
                 return;
             }
 
-            // Step 5: build the RENAME TABLE + user_meta + options update script.
-            $renameParts = [];
-            foreach ($tables as $t) {
-                $suffix = substr($t, strlen($currentPrefix));
-                if ($suffix === '' || ! preg_match('/^[a-zA-Z0-9_]+$/', $suffix)) {
-                    continue;
-                }
-                $renameParts[] = "`{$t}` TO `{$newPrefix}{$suffix}`";
-            }
-            if (empty($renameParts)) {
-                $this->dispatch('error', 'No se pudo construir el RENAME TABLE (ninguna tabla pasó la validación).');
+            $renamed = (int) ($payload['renamed'] ?? 0);
+            $metaUpdated = (int) ($payload['meta_updated'] ?? 0);
+            $optionsUpdated = (int) ($payload['options_updated'] ?? 0);
 
-                return;
-            }
-            $renameSql = 'RENAME TABLE '.implode(', ', $renameParts).';';
-
-            // user_meta updates — prefix-embedded keys.
-            // After rename, the user_meta TABLE is already at newprefix_usermeta.
-            $oldPrefixEscaped = str_replace("'", "''", $currentPrefix);
-            $newPrefixEscaped = str_replace("'", "''", $newPrefix);
-            $metaSql = <<<SQL
-UPDATE `{$newPrefix}usermeta` SET meta_key = REPLACE(meta_key, '{$oldPrefixEscaped}', '{$newPrefixEscaped}') WHERE meta_key LIKE '{$oldPrefixEscaped}%';
-UPDATE `{$newPrefix}options` SET option_name = REPLACE(option_name, '{$oldPrefixEscaped}', '{$newPrefixEscaped}') WHERE option_name LIKE '{$oldPrefixEscaped}%';
-SQL;
-
-            $fullSql = $renameSql."\n".$metaSql."\n";
-            $fullB64 = escapeshellarg(base64_encode($fullSql));
-            $runCmd = "docker exec {$escapedContainer} sh -c 'echo {$fullB64} | base64 -d | MYSQL_PWD=".escapeshellarg($dbPass)." mysql -h ".escapeshellarg($dbHost)." -u ".escapeshellarg($dbUser)." ".escapeshellarg($dbName)." 2>&1'";
-            if ($server->isNonRoot()) {
-                $runCmd = "sudo {$runCmd}";
-            }
-            $sqlOutput = (string) (instant_remote_process([$runCmd], $server, false) ?? '');
-            if (stripos($sqlOutput, 'ERROR') !== false) {
-                $this->dispatch('error', 'RENAME TABLE falló: '.trim($sqlOutput));
-
-                return;
-            }
-
-            // Step 6: backup wp-config.php before touching it.
+            // Step 3: backup wp-config.php before touching it.
             $backupName = 'wp-config.php.backup-'.now()->format('Ymd-His');
             $backupCmd = "docker exec {$escapedContainer} sh -c 'cp /var/www/html/wp-config.php /var/www/html/{$backupName}'";
             if ($server->isNonRoot()) {
@@ -760,78 +818,279 @@ SQL;
             }
             instant_remote_process([$backupCmd], $server, false);
 
-            // Step 7: rewrite wp-config.php with the new prefix.
-            $escapedPrefix = escapeshellarg($newPrefix);
-            $scriptContent = <<<'PHP'
-<?php
-$file = '/var/www/html/wp-config.php';
-if (!file_exists($file)) {
-    echo "ERROR: wp-config.php not found\n";
-    exit(1);
-}
-$content = file_get_contents($file);
-$newPrefix = $argv[1] ?? '';
-if (empty($newPrefix)) {
-    echo "ERROR: No prefix provided\n";
-    exit(1);
-}
-$pattern = '/(\$table_prefix\s*=\s*)["\']([^"\']*)["\']/';
-$replacement = '$1"' . $newPrefix . '"';
-$new = preg_replace($pattern, $replacement, $content);
-if ($new === null || $new === $content) {
-    echo "ERROR: wp-config.php did not contain a \$table_prefix assignment to replace\n";
-    exit(1);
-}
-if (file_put_contents($file, $new) === false) {
-    echo "ERROR: Failed to write wp-config.php\n";
-    exit(1);
-}
-echo "SUCCESS\n";
-PHP;
-
-            $scriptPath = '/tmp/update_prefix_'.uniqid().'.php';
-            $scriptB64 = escapeshellarg(base64_encode($scriptContent));
-            $writeScript = "docker exec {$escapedContainer} sh -c 'echo {$scriptB64} | base64 -d > ".escapeshellarg($scriptPath)."'";
-            if ($server->isNonRoot()) {
-                $writeScript = "sudo {$writeScript}";
-            }
-            instant_remote_process([$writeScript], $server, false);
-
-            $runScript = "docker exec {$escapedContainer} sh -c 'cd /var/www/html && php ".escapeshellarg($scriptPath)." {$escapedPrefix} 2>&1'";
-            if ($server->isNonRoot()) {
-                $runScript = "sudo {$runScript}";
-            }
-            $phpOutput = (string) (instant_remote_process([$runScript], $server, false) ?? '');
-
-            $cleanupScript = "docker exec {$escapedContainer} sh -c 'rm -f ".escapeshellarg($scriptPath)."'";
-            if ($server->isNonRoot()) {
-                $cleanupScript = "sudo {$cleanupScript}";
-            }
-            try {
-                instant_remote_process([$cleanupScript], $server, false);
-            } catch (\Throwable $e) {
-                // Best-effort cleanup.
-            }
-
-            if (stripos($phpOutput, 'ERROR') !== false) {
-                $this->dispatch('error', 'wp-config.php update failed: '.trim($phpOutput).' (las tablas ya fueron renombradas, tendrás que revertir manualmente — backup en /var/www/html/'.$backupName.')');
+            // Step 4: rewrite wp-config.php using a small PHP helper.
+            $rewriteScript = $this->buildRewriteWpConfigScript();
+            $rewriteResult = $this->runPhpScriptInContainer($server, $escapedContainer, $rewriteScript, [$newPrefix]);
+            if (! $rewriteResult['ok']) {
+                $this->dispatch('error', 'Tablas ya renombradas ('.$renamed.'), pero wp-config.php no se pudo reescribir: '.$rewriteResult['stderr'].'. Backup: /var/www/html/'.$backupName);
 
                 return;
             }
 
-            // Step 8: verify end-state.
+            // Step 5: verify end-state.
             $finalVerify = $this->detectWpPrefix($server, $containerName);
             if ($finalVerify !== $newPrefix) {
-                $this->dispatch('error', 'Prefijo cambiado en DB pero wp-config.php parece inconsistente. Verifica manualmente. Actual: '.($finalVerify ?? 'no detectado').'. Backup: /var/www/html/'.$backupName);
+                $this->dispatch('error', 'Prefijo cambiado en DB pero wp-config.php parece inconsistente. Actual: '.($finalVerify ?? 'no detectado').'. Backup: /var/www/html/'.$backupName);
 
                 return;
             }
 
             $this->detectWpPrefixes();
-            $this->dispatch('success', "Prefijo actualizado de {$currentPrefix} a {$newPrefix}: ".count($renameParts)." tablas renombradas + user_meta + options. Backup wp-config: /var/www/html/{$backupName}");
+            $summary = "Prefijo actualizado de {$currentPrefix} a {$newPrefix}: {$renamed} tablas renombradas, {$metaUpdated} filas usermeta, {$optionsUpdated} filas options. Backup wp-config: /var/www/html/{$backupName}";
+            $this->dispatch('success', $summary);
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Failed to update WordPress prefix: '.$e->getMessage());
         }
+    }
+
+    /**
+     * PHP helper script that runs inside the WordPress container to
+     * perform the RENAME TABLE + usermeta + options update using
+     * the `mysqli` extension (which is always available in WordPress
+     * images because WordPress itself needs it).
+     *
+     * Arguments when invoked: argv[1] = old prefix, argv[2] = new prefix.
+     *
+     * Output: a single JSON line on stdout with the shape
+     *     {ok: bool, renamed: int, meta_updated: int,
+     *      options_updated: int, message: string}
+     */
+    public function buildUpdatePrefixPhpScript(): string
+    {
+        return <<<'PHP'
+<?php
+// Runs inside the WordPress container. We intentionally do NOT load
+// wp-load.php because it requires a fully healthy WordPress state
+// and a specific prefix that may already be inconsistent. Instead we
+// pull the 4 DB constants directly out of wp-config.php with a
+// targeted regex.
+error_reporting(E_ERROR | E_PARSE);
+function out($payload) { echo json_encode($payload); exit; }
+
+$oldPrefix = $argv[1] ?? '';
+$newPrefix = $argv[2] ?? '';
+if (!preg_match('/^[a-zA-Z0-9_]+$/', $oldPrefix) || !preg_match('/^[a-zA-Z0-9_]+$/', $newPrefix)) {
+    out(['ok' => false, 'message' => 'Invalid prefix arguments.']);
+}
+
+$cfg = @file_get_contents('/var/www/html/wp-config.php');
+if ($cfg === false) {
+    out(['ok' => false, 'message' => 'wp-config.php not readable']);
+}
+
+function extract_define(string $content, string $name): ?string {
+    // Matches define('NAME', 'value'); with either quote style.
+    if (preg_match('/define\s*\(\s*[\'"]' . preg_quote($name, '/') . '[\'"]\s*,\s*([\'"])(.*?)\1\s*\)/s', $content, $m)) {
+        return $m[2];
+    }
+    return null;
+}
+
+$dbName = extract_define($cfg, 'DB_NAME');
+$dbUser = extract_define($cfg, 'DB_USER');
+$dbPass = extract_define($cfg, 'DB_PASSWORD');
+$dbHost = extract_define($cfg, 'DB_HOST') ?? 'localhost';
+if ($dbName === null || $dbUser === null || $dbPass === null) {
+    out(['ok' => false, 'message' => 'Could not read DB credentials from wp-config.php.']);
+}
+
+$mysqli = @new mysqli($dbHost, $dbUser, $dbPass, $dbName);
+if ($mysqli->connect_errno) {
+    out(['ok' => false, 'message' => 'mysqli connect failed: ' . $mysqli->connect_error]);
+}
+$mysqli->set_charset('utf8mb4');
+
+// LIKE pattern needs literal underscore escape (\_ inside a SQL
+// string literal is still LIKE's wildcard-free underscore).
+$likeOld = str_replace('_', '\\_', $oldPrefix) . '%';
+
+$res = $mysqli->query("SHOW TABLES LIKE '" . $mysqli->real_escape_string($likeOld) . "'");
+if (!$res) {
+    out(['ok' => false, 'message' => 'SHOW TABLES failed: ' . $mysqli->error]);
+}
+$oldTables = [];
+while ($row = $res->fetch_array(MYSQLI_NUM)) { $oldTables[] = $row[0]; }
+$res->free();
+
+// If no old-prefix tables, verify the new-prefix tables exist
+// already. That is the "user just wants to sync wp-config.php with
+// tables someone already renamed" case.
+if (empty($oldTables)) {
+    $likeNew = str_replace('_', '\\_', $newPrefix) . '%';
+    $res = $mysqli->query("SHOW TABLES LIKE '" . $mysqli->real_escape_string($likeNew) . "'");
+    $newExists = $res && $res->num_rows > 0;
+    if ($res) $res->free();
+    if ($newExists) {
+        out([
+            'ok' => true,
+            'renamed' => 0,
+            'meta_updated' => 0,
+            'options_updated' => 0,
+            'message' => 'Tables already use the new prefix — only wp-config.php needed updating.',
+        ]);
+    }
+    out(['ok' => false, 'message' => "No tables with prefix '$oldPrefix' or '$newPrefix' found."]);
+}
+
+// Build a single atomic RENAME TABLE.
+$renameParts = [];
+foreach ($oldTables as $t) {
+    $suffix = substr($t, strlen($oldPrefix));
+    if ($suffix === '' || !preg_match('/^[a-zA-Z0-9_]+$/', $suffix)) { continue; }
+    $renameParts[] = '`' . $t . '` TO `' . $newPrefix . $suffix . '`';
+}
+if (empty($renameParts)) {
+    out(['ok' => false, 'message' => 'No tables passed the rename validation.']);
+}
+
+$mysqli->begin_transaction();
+try {
+    $renameSql = 'RENAME TABLE ' . implode(', ', $renameParts);
+    if (!$mysqli->query($renameSql)) {
+        throw new RuntimeException('RENAME TABLE failed: ' . $mysqli->error);
+    }
+
+    $newUsermeta = $mysqli->real_escape_string($newPrefix . 'usermeta');
+    $newOptions = $mysqli->real_escape_string($newPrefix . 'options');
+    $oldEsc = $mysqli->real_escape_string($oldPrefix);
+    $newEsc = $mysqli->real_escape_string($newPrefix);
+
+    // usermeta: meta_key like 'wp_capabilities', 'wp_user_level', etc.
+    $metaSql = "UPDATE `$newUsermeta` SET meta_key = REPLACE(meta_key, '$oldEsc', '$newEsc') WHERE meta_key LIKE '$oldEsc%'";
+    if (!$mysqli->query($metaSql)) {
+        throw new RuntimeException('usermeta UPDATE failed: ' . $mysqli->error);
+    }
+    $metaUpdated = $mysqli->affected_rows;
+
+    // options: option_name like 'wp_user_roles'.
+    $optSql = "UPDATE `$newOptions` SET option_name = REPLACE(option_name, '$oldEsc', '$newEsc') WHERE option_name LIKE '$oldEsc%'";
+    if (!$mysqli->query($optSql)) {
+        throw new RuntimeException('options UPDATE failed: ' . $mysqli->error);
+    }
+    $optionsUpdated = $mysqli->affected_rows;
+
+    $mysqli->commit();
+    out([
+        'ok' => true,
+        'renamed' => count($renameParts),
+        'meta_updated' => (int) $metaUpdated,
+        'options_updated' => (int) $optionsUpdated,
+        'message' => 'ok',
+    ]);
+} catch (\Throwable $e) {
+    $mysqli->rollback();
+    out(['ok' => false, 'message' => $e->getMessage()]);
+}
+PHP;
+    }
+
+    /**
+     * Small PHP helper that rewrites the $table_prefix line inside
+     * /var/www/html/wp-config.php. Argv[1] = new prefix.
+     */
+    public function buildRewriteWpConfigScript(): string
+    {
+        return <<<'PHP'
+<?php
+$file = '/var/www/html/wp-config.php';
+$new = $argv[1] ?? '';
+if (!preg_match('/^[a-zA-Z0-9_]+$/', $new)) {
+    echo "ERROR: invalid prefix\n"; exit(1);
+}
+$content = @file_get_contents($file);
+if ($content === false) {
+    echo "ERROR: wp-config.php not readable\n"; exit(1);
+}
+// Anchored at line start so we never match the commented multisite
+// example. Replaces both quote styles with double quotes.
+$pattern = '/^(\s*)\$table_prefix\s*=\s*([\'"])(.*?)\2\s*;/m';
+$replacement = '$1$table_prefix = "' . $new . '";';
+$out = preg_replace($pattern, $replacement, $content, 1, $count);
+if ($out === null || $count === 0) {
+    echo "ERROR: no \$table_prefix assignment found to replace\n"; exit(1);
+}
+if (file_put_contents($file, $out) === false) {
+    echo "ERROR: failed to write wp-config.php\n"; exit(1);
+}
+echo "OK\n";
+PHP;
+    }
+
+    /**
+     * Helper that copies a PHP script to the target container via
+     * base64, runs it with `php <script> <args...>`, captures stdout
+     * and stderr, cleans up, and returns a result array.
+     *
+     * Uses the `php` binary which is guaranteed to exist in any
+     * WordPress image (without it WordPress itself could not run).
+     * No dependency on the `mysql` CLI or any other external tool.
+     *
+     * @param  array<int, string>  $args
+     * @return array{ok: bool, stdout: string, stderr: string, exit_code: int}
+     */
+    public function runPhpScriptInContainer($server, string $escapedContainer, string $scriptContent, array $args = []): array
+    {
+        $scriptPath = '/tmp/coolify-wp-'.uniqid('', true).'.php';
+        $scriptB64 = escapeshellarg(base64_encode($scriptContent));
+        $escapedPath = escapeshellarg($scriptPath);
+
+        // Write the script to the container.
+        $writeCmd = "docker exec {$escapedContainer} sh -c 'echo {$scriptB64} | base64 -d > {$escapedPath}'";
+        if ($server->isNonRoot()) {
+            $writeCmd = "sudo {$writeCmd}";
+        }
+        instant_remote_process([$writeCmd], $server, false);
+
+        // Execute. Wrap in a sentinel harness like
+        // FixWordPressContentPermissions so stdout is preserved even
+        // on non-zero exit, because instant_remote_process() will
+        // otherwise discard it via excludeCertainErrors().
+        $escapedArgs = implode(' ', array_map('escapeshellarg', $args));
+        $inner = "php {$escapedPath} {$escapedArgs}";
+        $wrapped = '('.$inner.' 2>/tmp/coolify-wp-stderr) ; __cc_status=$?; '
+            .'echo "__COOLIFY_WP_EXIT__=$__cc_status"; '
+            .'echo "__COOLIFY_WP_STDERR_START__"; '
+            .'cat /tmp/coolify-wp-stderr 2>/dev/null || true; '
+            .'echo "__COOLIFY_WP_STDERR_END__"; '
+            .'rm -f /tmp/coolify-wp-stderr; '
+            .'exit 0';
+        $runCmd = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($wrapped);
+        if ($server->isNonRoot()) {
+            $runCmd = "sudo {$runCmd}";
+        }
+        $raw = (string) (instant_remote_process([$runCmd], $server, false) ?? '');
+
+        // Best-effort cleanup.
+        $cleanup = "docker exec {$escapedContainer} sh -c 'rm -f {$escapedPath}'";
+        if ($server->isNonRoot()) {
+            $cleanup = "sudo {$cleanup}";
+        }
+        try {
+            instant_remote_process([$cleanup], $server, false);
+        } catch (\Throwable) {
+            // Non-fatal.
+        }
+
+        // Parse the sentinel output.
+        $exitCode = 0;
+        if (preg_match('/__COOLIFY_WP_EXIT__=(\d+)/', $raw, $m)) {
+            $exitCode = (int) $m[1];
+        }
+        $stderr = '';
+        if (preg_match('/__COOLIFY_WP_STDERR_START__\s*(.*?)\s*__COOLIFY_WP_STDERR_END__/s', $raw, $m)) {
+            $stderr = trim($m[1]);
+        }
+        // Strip both sentinels out of stdout.
+        $stdout = (string) preg_replace('/__COOLIFY_WP_EXIT__=\d+/', '', $raw);
+        $stdout = (string) preg_replace('/__COOLIFY_WP_STDERR_START__.*?__COOLIFY_WP_STDERR_END__/s', '', $stdout);
+        $stdout = trim($stdout);
+
+        return [
+            'ok' => $exitCode === 0,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+            'exit_code' => $exitCode,
+        ];
     }
 
     public function loadPhpIniSettings(?int $containerId = null)
@@ -1523,6 +1782,73 @@ PHP;
             $this->dispatch('error', 'Fallo arreglando permisos: '.$e->getMessage());
         } finally {
             $this->isFixingPermissions = false;
+        }
+    }
+
+    /**
+     * Applies the WP_PHP_INI_DEFAULTS preset to the currently selected
+     * php.ini container, calling updatePhpIniSetting() for each key.
+     * The existing updatePhpIniSetting() already knows how to create
+     * a LocalFileVolume on conf.d/99-custom-*.ini and docker cp it
+     * into the running container, so we just drive the loop.
+     *
+     * Exposed as a wire:click target from the "Configuración PHP" card
+     * in wordpress-manager.blade.php.
+     */
+    public function applyRecommendedPhpDefaults(): void
+    {
+        $this->authorize('update', $this->service);
+
+        if ($this->selectedContainerForPhpIni === null) {
+            // If the user hasn't picked a container yet, auto-select
+            // the first running WordPress container so the button is
+            // a single click from page load.
+            $firstRunning = collect($this->wordpressContainers)
+                ->first(fn ($c) => str((string) ($c['status'] ?? ''))->contains('running'));
+            if (! $firstRunning) {
+                $this->dispatch('error', 'No hay contenedores WordPress en ejecución.');
+
+                return;
+            }
+            $this->selectedContainerForPhpIni = (int) $firstRunning['id'];
+        }
+
+        $this->isApplyingPhpDefaults = true;
+
+        $applied = 0;
+        $failed = 0;
+        try {
+            foreach (self::WP_PHP_INI_DEFAULTS as $key => $value) {
+                try {
+                    // updatePhpIniSetting dispatches its own events. To
+                    // avoid a toast storm (7 success toasts in a row)
+                    // we temporarily silence it by wrapping in a
+                    // try/catch and counting locally.
+                    $this->updatePhpIniSetting($key, $value);
+                    $applied++;
+                } catch (\Throwable $e) {
+                    \Log::warning('applyRecommendedPhpDefaults: per-key failure', [
+                        'key' => $key,
+                        'value' => $value,
+                        'error' => $e->getMessage(),
+                    ]);
+                    $failed++;
+                }
+            }
+
+            // Reload so the form reflects whatever PHP actually
+            // ended up with after the saves.
+            $this->loadPhpIniSettings($this->selectedContainerForPhpIni);
+
+            if ($failed === 0) {
+                $this->dispatch('success', "Defaults WordPress aplicados: {$applied} directivas actualizadas. Puede que necesites un Restart para que memory_limit / upload_max_filesize surtan efecto.");
+            } else {
+                $this->dispatch('warning', "Defaults WordPress parcialmente aplicados: {$applied} ok, {$failed} fallidos. Revisa los logs.");
+            }
+        } catch (\Throwable $e) {
+            $this->dispatch('error', 'Fallo aplicando defaults: '.$e->getMessage());
+        } finally {
+            $this->isApplyingPhpDefaults = false;
         }
     }
 

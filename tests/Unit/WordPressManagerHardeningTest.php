@@ -130,18 +130,23 @@ it('job retries up to 3 times with exponential backoff', function () {
  | syncUrls: WP-CLI + SQL fallback
  | ----------------------------------------------------------------- */
 
-it('syncUrls SQL fallback covers the canonical URL tables', function () {
+it('syncUrls SQL fallback uses PHP + mysqli and covers the canonical URL tables', function () {
     $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
 
     expect($source)
         ->toContain('private function isWpCliAvailable')
         ->toContain('private function runSyncUrlsWithWpCli')
         ->toContain('private function runSyncUrlsWithSql')
-        ->toContain('WORDPRESS_DB_HOST')
-        ->toContain('WORDPRESS_DB_PASSWORD')
-        ->toContain('WORDPRESS_DB_NAME')
-        ->toContain('WORDPRESS_DB_USER')
-        ->toContain('MYSQL_PWD=')
+        ->toContain('buildSyncUrlsPhpScript')
+        // Updates options, posts, postmeta, comments.
+        ->toContain("\$prefix . 'options'")
+        ->toContain("\$prefix . 'posts'")
+        ->toContain("\$prefix . 'postmeta'")
+        ->toContain("\$prefix . 'comments'")
+        // Excludes PHP-serialized blobs that can't be safely updated.
+        ->toContain('NOT REGEXP')
+        // Warns about the serialized-data limitation in the user-facing
+        // output of syncUrls() itself.
         ->toContain('datos serializados');
 });
 
@@ -149,27 +154,48 @@ it('syncUrls SQL fallback covers the canonical URL tables', function () {
  | updateWpPrefix: atomic RENAME TABLE + user_meta fix
  | ----------------------------------------------------------------- */
 
-it('updateWpPrefix refuses to run without mysql CLI to avoid tumbling the site', function () {
+it('updateWpPrefix uses PHP + mysqli inside the container instead of the mysql CLI', function () {
     $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
 
+    // The old implementation relied on the mysql client which is
+    // not present in the official WordPress image. The rewrite
+    // uses a PHP helper script that opens mysqli — a hard
+    // requirement for WordPress itself, so always available.
     expect($source)
-        // Abort early if mysql is not present.
-        ->toContain('No puedo renombrar las tablas')
-        ->toContain("`command -v mysql");
+        ->toContain('buildUpdatePrefixPhpScript')
+        ->toContain('runPhpScriptInContainer')
+        ->toContain('new mysqli(')
+        ->toContain('$mysqli->begin_transaction()')
+        // And the old mysql-CLI-based abort is gone.
+        ->not->toContain("'No puedo renombrar las tablas'");
 });
 
-it('updateWpPrefix builds a single atomic RENAME TABLE + user_meta + options update', function () {
+it('updateWpPrefix script covers RENAME TABLE + usermeta + options in a single transaction', function () {
     $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
 
     expect($source)
         ->toContain('RENAME TABLE ')
         ->toContain("SHOW TABLES LIKE '")
-        ->toContain('usermeta` SET meta_key = REPLACE')
-        ->toContain('options` SET option_name = REPLACE')
+        ->toContain("\$newPrefix . 'usermeta'")
+        ->toContain("\$newPrefix . 'options'")
+        // Wraps everything in a transaction with rollback on error.
+        ->toContain('begin_transaction')
+        ->toContain('$mysqli->rollback')
         // Backs up wp-config.php before touching it.
         ->toContain('wp-config.php.backup-')
         // Rejects prefixes without trailing underscore (WP convention).
         ->toContain('debe terminar en un guion bajo');
+});
+
+it('updateWpPrefix handles the "tables already have the new prefix" no-op case', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
+
+    // When the user wrote a different prefix in wp-config.php already
+    // and only wants Coolify to rename the tables to match, our
+    // script should also handle the inverse: tables already match,
+    // just update wp-config.php.
+    expect($source)
+        ->toContain('Tables already use the new prefix');
 });
 
 /* -----------------------------------------------------------------
@@ -212,4 +238,99 @@ it('wordpress-manager blade avoids Tailwind arbitrary-value classes that break o
     expect($blade)
         ->not->toMatch('/class="[^"]*w-\[[^\]]+\]/')
         ->not->toMatch('/class="[^"]*h-\[[^\]]+\]/');
+});
+
+/* -----------------------------------------------------------------
+ | Recommended WordPress php.ini defaults
+ | ----------------------------------------------------------------- */
+
+it('WordPressManager exposes the WP_PHP_INI_DEFAULTS constant with sensible values', function () {
+    $defaults = \App\Livewire\Project\Service\WordPressManager::WP_PHP_INI_DEFAULTS;
+
+    expect($defaults)->toBeArray();
+    expect($defaults['upload_max_filesize'] ?? null)->toBe('256M');
+    expect($defaults['post_max_size'] ?? null)->toBe('256M');
+    expect($defaults['memory_limit'] ?? null)->toBe('512M');
+    expect($defaults['max_execution_time'] ?? null)->toBe('300');
+    expect($defaults['max_input_time'] ?? null)->toBe('300');
+    expect($defaults['max_input_vars'] ?? null)->toBe('5000');
+    expect($defaults['max_file_uploads'] ?? null)->toBe('50');
+});
+
+it('applyRecommendedPhpDefaults is exposed as a public wire:click target', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
+    $blade = file_get_contents(__DIR__.'/../../resources/views/livewire/project/service/wordpress-manager.blade.php');
+
+    expect($source)
+        ->toContain('public function applyRecommendedPhpDefaults')
+        ->toContain('public bool $isApplyingPhpDefaults')
+        ->toContain('self::WP_PHP_INI_DEFAULTS');
+
+    expect($blade)
+        ->toContain('wire:click="applyRecommendedPhpDefaults"')
+        ->toContain('wire:confirm="¿Aplicar los defaults recomendados')
+        ->toContain('Aplicar defaults WordPress');
+});
+
+it('SetupWordPress seeds the recommended php.ini defaults on first setup', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Actions/Service/SetupWordPress.php');
+
+    expect($source)
+        ->toContain('seedRecommendedPhpIniDefaults')
+        ->toContain('WordPressManager::WP_PHP_INI_DEFAULTS')
+        ->toContain('LocalFileVolume')
+        ->toContain('99-custom-')
+        ->toContain('/usr/local/etc/php/conf.d/')
+        // Soft reloads PHP-FPM so the new conf.d files take effect.
+        ->toContain('pkill -USR2 php-fpm');
+});
+
+/* -----------------------------------------------------------------
+ | parseTablePrefixFromConfig: ignores commented examples
+ | ----------------------------------------------------------------- */
+
+it('parseTablePrefixFromConfig ignores commented multisite example', function () {
+    // The WordPress default wp-config.php ships with a comment that
+    // contains `$table_prefix = '...';` as an example. The old grep
+    // approach matched this line too and head -1 would pick it.
+    $content = "<?php\n/**\n * Example:\n * \$table_prefix = 'example_';\n */\n\$table_prefix = 'jz8i7ogy_';\n";
+
+    $prefix = \App\Livewire\Project\Service\WordPressManager::parseTablePrefixFromConfig($content);
+    expect($prefix)->toBe('jz8i7ogy_');
+});
+
+it('parseTablePrefixFromConfig handles both quote styles', function () {
+    expect(\App\Livewire\Project\Service\WordPressManager::parseTablePrefixFromConfig("<?php\n\$table_prefix = 'wp_';"))
+        ->toBe('wp_');
+    expect(\App\Livewire\Project\Service\WordPressManager::parseTablePrefixFromConfig("<?php\n\$table_prefix = \"wp_\";"))
+        ->toBe('wp_');
+});
+
+it('parseTablePrefixFromConfig accepts mixed case prefixes', function () {
+    $content = "<?php\n\$table_prefix = 'JZ8I7oGy_';";
+    expect(\App\Livewire\Project\Service\WordPressManager::parseTablePrefixFromConfig($content))
+        ->toBe('JZ8I7oGy_');
+});
+
+it('parseTablePrefixFromConfig returns null on invalid prefix characters', function () {
+    $content = "<?php\n\$table_prefix = 'invalid!';";
+    expect(\App\Livewire\Project\Service\WordPressManager::parseTablePrefixFromConfig($content))
+        ->toBeNull();
+});
+
+/* -----------------------------------------------------------------
+ | FileExplorer: land on /var/www/html for WordPress services
+ | ----------------------------------------------------------------- */
+
+it('FileExplorer lands on /var/www/html for WordPress services, not just Laravel Rootkit', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Shared/FileExplorer.php');
+
+    expect($source)
+        ->toContain('shouldDefaultToAppWorkdirPath')
+        // WordPress marker detection in the compose raw.
+        ->toContain('WORDPRESS_DB_HOST')
+        ->toContain('WORDPRESS_DB_NAME')
+        // Check for wp-config.php / wp-content as WordPress markers.
+        ->toContain('wp-config.php')
+        ->toContain('wp-content');
 });

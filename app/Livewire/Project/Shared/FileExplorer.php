@@ -319,7 +319,12 @@ class FileExplorer extends Component
 
     private function detectDefaultPathForSelectedContainer(): ?string
     {
-        if (! $this->shouldDefaultToLaravelRootkitPath()) {
+        // Broadened to also cover WordPress services (and any other
+        // PHP web-app stack that lives in /var/www/html). The old
+        // gate was scoped to the Laravel RootKit stack only, which
+        // is why entering Files on a WordPress container landed you
+        // at / instead of /var/www/html.
+        if (! $this->shouldDefaultToAppWorkdirPath()) {
             return null;
         }
 
@@ -358,12 +363,22 @@ class FileExplorer extends Component
                 }
 
                 if ($path === '/var/www/html') {
-                    $artisanCheck = "docker exec {$escapedContainer} sh -c 'test -f /var/www/html/artisan && echo ok || echo no'";
+                    // Prefer /var/www/html whenever it exists AND
+                    // contains either a Laravel artisan file or a
+                    // WordPress wp-config.php / wp-content folder.
+                    // If neither, we still return /var/www/html
+                    // (below) because that's the canonical web
+                    // workdir for most PHP images.
+                    $markerCheck = "docker exec {$escapedContainer} sh -c '"
+                        ."(test -f /var/www/html/artisan && echo laravel) || "
+                        ."(test -f /var/www/html/wp-config.php && echo wordpress) || "
+                        ."(test -d /var/www/html/wp-content && echo wordpress) || "
+                        ."echo other'";
                     if ($server->isNonRoot()) {
-                        $artisanCheck = "sudo {$artisanCheck}";
+                        $markerCheck = "sudo {$markerCheck}";
                     }
-                    $isLaravel = trim((string) (instant_remote_process([$artisanCheck], $server, false) ?? '')) === 'ok';
-                    if ($isLaravel) {
+                    $marker = trim((string) (instant_remote_process([$markerCheck], $server, false) ?? ''));
+                    if (in_array($marker, ['laravel', 'wordpress'], true)) {
                         return '/var/www/html';
                     }
                 }
@@ -377,7 +392,16 @@ class FileExplorer extends Component
         return null;
     }
 
-    private function shouldDefaultToLaravelRootkitPath(): bool
+    /**
+     * Returns true when we should try to auto-navigate into the
+     * application workdir (usually /var/www/html) instead of dumping
+     * the user at /. The previous implementation
+     * (shouldDefaultToLaravelRootkitPath) only matched Laravel
+     * RootKit, so WordPress / Symfony / generic PHP services all
+     * landed at /. The new name + broader markers cover every
+     * web-app service Coolify manages today.
+     */
+    private function shouldDefaultToAppWorkdirPath(): bool
     {
         if ($this->type !== 'service') {
             return false;
@@ -391,11 +415,33 @@ class FileExplorer extends Component
             return false;
         }
 
-        // Keep this behavior scoped to the Laravel Rootkit stack only.
-        // Markers are intentionally simple and resilient to minor template edits.
-        return str_contains($composeRaw, 'APP_NAME=Laravel RootKit')
+        // Laravel RootKit — the original marker set.
+        if (str_contains($composeRaw, 'APP_NAME=Laravel RootKit')
             || (str_contains($composeRaw, 'SERVICE_GITHUB_REPO_URL')
-                && str_contains($composeRaw, 'laravel-files:/var/www/html'));
+                && str_contains($composeRaw, 'laravel-files:/var/www/html'))) {
+            return true;
+        }
+
+        // WordPress — any compose that declares the WORDPRESS_DB_*
+        // env vars or uses a `wordpress` image tag. Covers both the
+        // official WordPress template and custom WordPress stacks.
+        if (str_contains($composeRaw, 'WORDPRESS_DB_HOST')
+            || str_contains($composeRaw, 'WORDPRESS_DB_NAME')
+            || preg_match('/image:\s*[^\s]*wordpress/i', $composeRaw)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Backward-compat shim kept so any external caller (extension,
+     * test, or future refactor) that still references the old method
+     * name continues to work. Delegates to the new method.
+     */
+    private function shouldDefaultToLaravelRootkitPath(): bool
+    {
+        return $this->shouldDefaultToAppWorkdirPath();
     }
 
     private function normalizeContainerName(string $name): string
