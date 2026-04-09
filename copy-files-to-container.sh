@@ -145,10 +145,24 @@ else
             if [ ! -z "$LAST_COMMIT" ]; then
                 echo -e "${BLUE}   Último commit: ${LAST_COMMIT:0:8}...${NC}"
 
-                # Archivos modificados en el último commit comparados con HEAD~1
-                # Si es el primer commit, comparar con un árbol vacío
-                if git rev-parse HEAD~1 > /dev/null 2>&1; then
-                    COMMIT_FILES=$(git diff --name-only --diff-filter=ACMR HEAD~1 HEAD 2>/dev/null || echo "")
+                # Preferir ORIG_HEAD como base: git lo deja apuntando al commit
+                # anterior al último pull/merge, así que si deploy.sh acaba de
+                # traer N commits de una vez (fast-forward), capturamos TODOS los
+                # archivos tocados, no solo los del último commit. Caemos en
+                # HEAD~1 como fallback (ejecución sin pull previo) y en git
+                # diff-tree para el primer commit del repo.
+                if git rev-parse --verify ORIG_HEAD > /dev/null 2>&1; then
+                    BASE_COMMIT="ORIG_HEAD"
+                    echo -e "${BLUE}   Base de comparación: ORIG_HEAD ($(git rev-parse --short ORIG_HEAD))${NC}"
+                elif git rev-parse HEAD~1 > /dev/null 2>&1; then
+                    BASE_COMMIT="HEAD~1"
+                    echo -e "${BLUE}   Base de comparación: HEAD~1${NC}"
+                else
+                    BASE_COMMIT=""
+                fi
+
+                if [ -n "$BASE_COMMIT" ]; then
+                    COMMIT_FILES=$(git diff --name-only --diff-filter=ACMR "$BASE_COMMIT" HEAD 2>/dev/null || echo "")
                 else
                     # Primer commit: incluir todos los archivos del commit
                     COMMIT_FILES=$(git diff-tree --no-commit-id --name-only --diff-filter=ACMR -r HEAD 2>/dev/null || echo "")
