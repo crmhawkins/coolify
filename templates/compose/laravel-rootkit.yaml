@@ -246,6 +246,423 @@ services:
 
           git config --global --add safe.directory /var/www/html || true
 
+          # ============================================================
+          # PRE-FLIGHT PHP version check
+          # ============================================================
+          # Parses composer.json BEFORE running composer install and
+          # checks that the container's PHP major.minor satisfies the
+          # constraint the project declares. If it does not, we write
+          # a Spanish, step-by-step error page that tells the user
+          # (including a non-dev deploying for a client) the exact
+          # value to put in Coolify's SERVICE_PHP_VERSION, then skip
+          # straight to supervisord so nginx serves the page.
+          #
+          # Why: without this check the user would get the raw composer
+          # error "project requires php ^8.0.2|^8.1|^8.2 — your system
+          # has 8.4.1" buried in logs, and no clear indication of what
+          # to change in the Coolify UI. With it, the first failed
+          # deploy is self-explanatory and the fix is two minutes of
+          # clicking.
+          #
+          # Always runs before composer install. Clean-slates any
+          # leftover error pages from a previous boot so a successful
+          # redeploy doesn't keep showing a stale error.
+          rm -f /var/www/html/public/_coolify_preflight_error.html \
+                /var/www/html/public/_coolify_error.html 2>/dev/null || true
+
+          # PHP parser written to /tmp so we don't have to escape
+          # everything for shell. Quoted heredoc ('PREFLIGHT_PHP_EOF')
+          # means NO shell expansion happens inside — the $variables
+          # you see are PHP variables, not shell ones.
+          cat > /tmp/coolify-preflight.php <<'PREFLIGHT_PHP_EOF'
+          <?php
+          // Coolify Laravel RootKit pre-flight PHP version check.
+          // Emits KEY=VALUE lines on stdout. The calling shell script
+          // reads them and decides whether to abort with an error page.
+          $file = 'composer.json';
+          $current = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
+
+          if (!file_exists($file)) {
+              echo "STATUS=SKIP_NO_COMPOSER_JSON\nCURRENT=$current\n";
+              exit(0);
+          }
+
+          $raw = @file_get_contents($file);
+          $json = @json_decode((string) $raw, true);
+          if (!is_array($json)) {
+              echo "STATUS=SKIP_INVALID_JSON\nCURRENT=$current\n";
+              exit(0);
+          }
+
+          $constraint = $json['require']['php'] ?? null;
+          if (!is_string($constraint) || trim($constraint) === '') {
+              echo "STATUS=SKIP_NO_CONSTRAINT\nCURRENT=$current\n";
+              exit(0);
+          }
+          $constraint = trim($constraint);
+
+          // Candidate PHP minor versions, highest first. These track
+          // what the php:X.Y-fpm-alpine official image ships as of
+          // April 2026. Update this list when a new PHP major/minor
+          // gets an official alpine image.
+          $candidates = ['8.4', '8.3', '8.2', '8.1', '8.0'];
+
+          function v_num(int $maj, int $min, int $patch): int {
+              return $maj * 10000 + $min * 100 + $patch;
+          }
+
+          function v_tuple(string $v): array {
+              $p = explode('.', $v);
+              return [(int) ($p[0] ?? 0), (int) ($p[1] ?? 0), (int) ($p[2] ?? 0)];
+          }
+
+          function satisfies_atom(string $v, string $atom): bool {
+              $atom = trim($atom);
+              if ($atom === '' || $atom === '*') {
+                  return true;
+              }
+              [$vMaj, $vMin, $vPatch] = v_tuple($v);
+              $vN = v_num($vMaj, $vMin, $vPatch);
+
+              // ^X.Y or ^X.Y.Z → >=X.Y.Z, <(X+1).0.0
+              if (preg_match('/^\^(\d+)\.(\d+)(?:\.(\d+))?$/', $atom, $m)) {
+                  $maj = (int) $m[1];
+                  $min = (int) $m[2];
+                  $patch = (int) ($m[3] ?? 0);
+                  return $vN >= v_num($maj, $min, $patch) && $vN < v_num($maj + 1, 0, 0);
+              }
+              // ~X.Y → >=X.Y, <(X+1).0 ; ~X.Y.Z → >=X.Y.Z, <X.(Y+1).0
+              if (preg_match('/^~(\d+)\.(\d+)(?:\.(\d+))?$/', $atom, $m)) {
+                  $maj = (int) $m[1];
+                  $min = (int) $m[2];
+                  $hasPatch = isset($m[3]) && $m[3] !== '';
+                  $patch = $hasPatch ? (int) $m[3] : 0;
+                  $floor = v_num($maj, $min, $patch);
+                  $ceil = $hasPatch ? v_num($maj, $min + 1, 0) : v_num($maj + 1, 0, 0);
+                  return $vN >= $floor && $vN < $ceil;
+              }
+              // Comparison operators: >=, >, <=, <, = (or bare X.Y / X.Y.Z)
+              if (preg_match('/^(>=|>|<=|<|=)?(\d+)\.(\d+)(?:\.(\d+))?$/', $atom, $m)) {
+                  $op = $m[1] ?: '=';
+                  $t = v_num((int) $m[2], (int) $m[3], (int) ($m[4] ?? 0));
+                  switch ($op) {
+                      case '>=': return $vN >= $t;
+                      case '>':  return $vN > $t;
+                      case '<=': return $vN <= $t;
+                      case '<':  return $vN < $t;
+                      default:
+                          // Bare "X.Y" or "X.Y.Z" → treat as "same
+                          // major.minor", ignoring any patch number.
+                          // This is deliberately LOOSER than composer's
+                          // strict semver: projects that pin an exact
+                          // "8.2.12" rarely mean "reject 8.2.15", they
+                          // just copy-pasted from somewhere. Our
+                          // candidate list is X.Y only, so a minor
+                          // match is the most useful interpretation.
+                          return $vMaj === (int) $m[2] && $vMin === (int) $m[3];
+                  }
+              }
+              // Wildcards: X.Y.* and X.*
+              if (preg_match('/^(\d+)\.(\d+)\.\*$/', $atom, $m)) {
+                  return $vMaj === (int) $m[1] && $vMin === (int) $m[2];
+              }
+              if (preg_match('/^(\d+)\.\*$/', $atom, $m)) {
+                  return $vMaj === (int) $m[1];
+              }
+              // Unknown / exotic constraint — be permissive and let
+              // composer catch it, instead of blocking the deploy on
+              // a format we did not anticipate.
+              return true;
+          }
+
+          function satisfies_constraint(string $v, string $constraint): bool {
+              // OR groups separated by | or ||
+              $orParts = preg_split('/\s*\|\|?\s*/', $constraint);
+              if ($orParts === false) {
+                  $orParts = [$constraint];
+              }
+              foreach ($orParts as $orPart) {
+                  // AND groups separated by space or comma
+                  $andParts = preg_split('/[\s,]+/', trim($orPart));
+                  if ($andParts === false) {
+                      $andParts = [$orPart];
+                  }
+                  $allMatch = true;
+                  foreach ($andParts as $atom) {
+                      $atom = trim($atom);
+                      if ($atom === '') {
+                          continue;
+                      }
+                      if (!satisfies_atom($v, $atom)) {
+                          $allMatch = false;
+                          break;
+                      }
+                  }
+                  if ($allMatch) {
+                      return true;
+                  }
+              }
+              return false;
+          }
+
+          $matches = [];
+          foreach ($candidates as $v) {
+              if (satisfies_constraint($v, $constraint)) {
+                  $matches[] = $v;
+              }
+          }
+          $currentOk = satisfies_constraint($current, $constraint);
+
+          // -----------------------------------------------------------
+          // Known runtime-incompatible combinations (composer.lock-based)
+          // -----------------------------------------------------------
+          // composer.json can declare a loose PHP constraint (e.g.
+          // Laravel 9's "^8.0.2") that composer install accepts on
+          // PHP 8.4, but the installed dep tree may include packages
+          // that explode at runtime on newer PHP versions. Livewire
+          // 2.x is the canonical case: it declares "^8.0" (which
+          // covers 8.4) but its source uses utf8_encode() and other
+          // removed-in-8.2+ functions that crash the first request.
+          //
+          // We maintain a small, explicit table of "known bad combos"
+          // and filter the candidate set further so the preflight
+          // still recommends the correct max PHP version for projects
+          // that carry those packages. Add new entries when you hit
+          // a reproducible runtime incompatibility that composer
+          // itself doesn't catch.
+          $knownIssues = [
+              [
+                  'package' => 'livewire/livewire',
+                  'versionRegex' => '/^v?[12]\./',
+                  'maxPhpMinor' => 802, // PHP 8.2 max
+                  'reason' => 'Livewire 2.x no arranca en PHP 8.3+ (utf8_encode y otras deprecations eliminadas)',
+              ],
+          ];
+
+          $activeIssues = [];
+          if (file_exists('composer.lock')) {
+              $lockRaw = @file_get_contents('composer.lock');
+              $lockData = @json_decode((string) $lockRaw, true);
+              if (is_array($lockData)) {
+                  $installed = [];
+                  foreach (($lockData['packages'] ?? []) as $pkg) {
+                      if (is_array($pkg) && isset($pkg['name'], $pkg['version'])) {
+                          $installed[(string) $pkg['name']] = (string) $pkg['version'];
+                      }
+                  }
+                  foreach ($knownIssues as $issue) {
+                      $pkgName = $issue['package'];
+                      if (!isset($installed[$pkgName])) {
+                          continue;
+                      }
+                      if (!preg_match($issue['versionRegex'], $installed[$pkgName])) {
+                          continue;
+                      }
+                      $activeIssues[] = $issue + ['installedVersion' => $installed[$pkgName]];
+                  }
+              }
+          }
+
+          if (!empty($activeIssues)) {
+              // Re-filter the candidate match list under all active
+              // runtime-issue ceilings. Also re-check whether current
+              // PHP is still acceptable under the combined rules.
+              $filtered = [];
+              foreach ($matches as $c) {
+                  [$cMaj, $cMin] = v_tuple($c);
+                  $cNum = $cMaj * 100 + $cMin;
+                  $allowed = true;
+                  foreach ($activeIssues as $issue) {
+                      if ($cNum > $issue['maxPhpMinor']) {
+                          $allowed = false;
+                          break;
+                      }
+                  }
+                  if ($allowed) {
+                      $filtered[] = $c;
+                  }
+              }
+              $matches = $filtered;
+
+              [$curMaj, $curMin] = v_tuple($current);
+              $curNum = $curMaj * 100 + $curMin;
+              $currentOk = false;
+              foreach ($matches as $c) {
+                  [$cMaj, $cMin] = v_tuple($c);
+                  if ($cMaj === $curMaj && $cMin === $curMin) {
+                      $currentOk = true;
+                      break;
+                  }
+              }
+
+              // Annotate the constraint string so the generated error
+              // page shows the real reason ("your composer.json says
+              // X but we detected Livewire 2 which caps PHP at Y").
+              $reasonParts = [];
+              foreach ($activeIssues as $issue) {
+                  $reasonParts[] = $issue['package'] . ' ' . $issue['installedVersion'] . ': ' . $issue['reason'];
+              }
+              $constraint = $constraint . ' | ' . implode(' | ', $reasonParts);
+          }
+
+          $status = $currentOk ? 'OK' : (empty($matches) ? 'NO_SUPPORTED_VERSION' : 'MISMATCH');
+          echo "STATUS=$status\n";
+          echo "CURRENT=$current\n";
+          echo "CONSTRAINT=$constraint\n";
+          echo "BEST=" . ($matches[0] ?? 'NONE') . "\n";
+          echo "ALL_MATCHES=" . implode(',', $matches) . "\n";
+          PREFLIGHT_PHP_EOF
+
+          PREFLIGHT_OUTPUT="$(cd /var/www/html && php /tmp/coolify-preflight.php 2>&1 || true)"
+          rm -f /tmp/coolify-preflight.php
+
+          PF_STATUS="$(printf '%s\n' "$PREFLIGHT_OUTPUT" | grep '^STATUS=' | head -n 1 | cut -d= -f2-)"
+          PF_CURRENT="$(printf '%s\n' "$PREFLIGHT_OUTPUT" | grep '^CURRENT=' | head -n 1 | cut -d= -f2-)"
+          PF_CONSTRAINT="$(printf '%s\n' "$PREFLIGHT_OUTPUT" | grep '^CONSTRAINT=' | head -n 1 | cut -d= -f2-)"
+          PF_BEST="$(printf '%s\n' "$PREFLIGHT_OUTPUT" | grep '^BEST=' | head -n 1 | cut -d= -f2-)"
+          PF_ALL="$(printf '%s\n' "$PREFLIGHT_OUTPUT" | grep '^ALL_MATCHES=' | head -n 1 | cut -d= -f2-)"
+
+          echo "Pre-flight PHP version check: status=${PF_STATUS:-UNKNOWN} current=${PF_CURRENT:-?} constraint=${PF_CONSTRAINT:-?} best=${PF_BEST:-?}"
+
+          if [ "$PF_STATUS" = "MISMATCH" ] || [ "$PF_STATUS" = "NO_SUPPORTED_VERSION" ]; then
+            echo "FATAL: PHP version mismatch — writing Spanish error page and skipping composer install."
+            mkdir -p /var/www/html/public
+
+            # Title banner differs between the two failure modes.
+            # MISMATCH: we have a recommended version to point to.
+            # NO_SUPPORTED_VERSION: project needs something outside
+            #   the 8.0-8.4 range, nothing for the user to change on
+            #   the Coolify side — they have to edit composer.json.
+            if [ "$PF_STATUS" = "MISMATCH" ]; then
+              PF_HEADLINE="Este servicio necesita PHP ${PF_BEST}"
+              PF_SUBLINE="El proyecto requiere PHP <strong>${PF_BEST}</strong>, pero el contenedor está corriendo PHP <strong>${PF_CURRENT}</strong>. El despliegue no puede continuar hasta que lo cambies."
+              PF_FIX_TITLE="Cómo arreglarlo (2 minutos)"
+              PF_SHOW_STEPS=1
+            else
+              PF_HEADLINE="Versión de PHP no soportada"
+              PF_SUBLINE="Tu proyecto declara <code>${PF_CONSTRAINT}</code>, que está fuera del rango que soporta esta plantilla (PHP 8.0 a 8.4)."
+              PF_FIX_TITLE="Qué hacer"
+              PF_SHOW_STEPS=0
+            fi
+
+            # HTML error page. Heredoc is UNQUOTED so shell vars
+            # expand — CSS has no literal dollar signs so we don't
+            # need to escape anything.
+            cat > /var/www/html/public/_coolify_preflight_error.html <<HTMLEOF
+          <!doctype html>
+          <html lang="es">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Coolify: Versión de PHP incorrecta</title>
+          <style>
+          :root { color-scheme: dark }
+          * { box-sizing: border-box }
+          body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #0b0f19; color: #e5e7eb; line-height: 1.6 }
+          .wrap { max-width: 840px; margin: 0 auto; padding: 32px 20px 64px }
+          .banner { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #1c1917; border-radius: 16px; padding: 24px 28px; margin-bottom: 24px; box-shadow: 0 10px 30px rgba(245, 158, 11, 0.25) }
+          .banner h1 { margin: 0 0 8px; font-size: 24px; font-weight: 800 }
+          .banner p { margin: 0; font-size: 16px; font-weight: 500 }
+          .banner strong { color: #0c0a09 }
+          .banner code { background: rgba(12, 10, 9, 0.15); padding: 2px 8px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace }
+          .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 24px 28px; margin-bottom: 20px }
+          .card h2 { margin: 0 0 16px; font-size: 18px; color: #fff; font-weight: 700 }
+          .fix-box { background: linear-gradient(135deg, rgba(34, 197, 94, 0.08), rgba(16, 185, 129, 0.04)); border: 1px solid rgba(34, 197, 94, 0.25) }
+          .fix-box h2 { color: #86efac }
+          .steps { margin: 0; padding: 0 0 0 24px }
+          .steps li { margin-bottom: 14px; padding-left: 8px; font-size: 15px; color: #e5e7eb }
+          .steps li strong { color: #fff; font-weight: 700 }
+          .steps ul { margin: 8px 0 0 0; padding-left: 20px; list-style: disc }
+          .steps ul li { margin-bottom: 6px }
+          .big-value { display: inline-block; background: #22c55e; color: #052e16; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 800; font-size: 18px; padding: 4px 12px; border-radius: 6px; margin: 0 2px }
+          .kv { margin: 0; list-style: none; padding: 0 }
+          .kv li { margin-bottom: 10px; font-size: 14px; color: #cbd5e1 }
+          .kv li strong { color: #fff; min-width: 260px; display: inline-block }
+          code { background: #0b1220; border: 1px solid #1f2937; border-radius: 4px; padding: 2px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #e5e7eb; font-size: 13px }
+          .muted { color: #94a3b8; font-size: 13px }
+          .footer { margin-top: 24px; font-size: 12px; color: #71717a; text-align: center; line-height: 1.5 }
+          </style>
+          </head>
+          <body>
+          <div class="wrap">
+          <div class="banner">
+          <h1>⚠ ${PF_HEADLINE}</h1>
+          <p>${PF_SUBLINE}</p>
+          </div>
+          <div class="card fix-box">
+          <h2>${PF_FIX_TITLE}</h2>
+          HTMLEOF
+
+            if [ "$PF_SHOW_STEPS" = "1" ]; then
+              cat >> /var/www/html/public/_coolify_preflight_error.html <<HTMLEOF
+          <ol class="steps">
+          <li>Ve al panel de <strong>Coolify</strong> donde estás ahora mismo.</li>
+          <li>Abre este mismo servicio — el que te acaba de dar este mensaje.</li>
+          <li>Arriba, pulsa la pestaña <strong>Environment Variables</strong>.</li>
+          <li>Busca la variable <code>SERVICE_PHP_VERSION</code>:
+          <ul>
+          <li>Si <strong>ya existe</strong>, cambia su valor a: <span class="big-value">${PF_BEST}</span></li>
+          <li>Si <strong>no existe</strong>, créala con:<br>Name: <code>SERVICE_PHP_VERSION</code> &nbsp;·&nbsp; Value: <span class="big-value">${PF_BEST}</span></li>
+          </ul>
+          </li>
+          <li>Pulsa <strong>Save</strong> para guardar la variable.</li>
+          <li>Vuelve a la página principal del servicio.</li>
+          <li>Pulsa el botón <strong>Redeploy</strong> (arriba a la derecha, icono amarillo).</li>
+          <li>Espera a que termine el despliegue. Esta página desaparecerá sola y verás tu aplicación en marcha.</li>
+          </ol>
+          HTMLEOF
+            else
+              cat >> /var/www/html/public/_coolify_preflight_error.html <<HTMLEOF
+          <p>Este template solo soporta versiones de PHP entre <code>8.0</code> y <code>8.4</code> (las que publica oficialmente la imagen <code>php:X.Y-fpm-alpine</code>).</p>
+          <p>Tienes dos opciones:</p>
+          <ol class="steps">
+          <li><strong>Actualiza el proyecto</strong>: edita el <code>composer.json</code> del repositorio para que <code>require.php</code> permita una versión entre 8.0 y 8.4, haz commit y vuelve a desplegar.</li>
+          <li><strong>Usa una plantilla distinta</strong>: si el proyecto necesita PHP 7.x, busca en Coolify otra plantilla de servicio que soporte esa versión — esta no la cubre.</li>
+          </ol>
+          HTMLEOF
+            fi
+
+            cat >> /var/www/html/public/_coolify_preflight_error.html <<HTMLEOF
+          </div>
+          <div class="card">
+          <h2>Detalles técnicos</h2>
+          <ul class="kv">
+          <li><strong>PHP del contenedor:</strong> <code>${PF_CURRENT}</code></li>
+          <li><strong>Restricción en composer.json:</strong> <code>${PF_CONSTRAINT}</code></li>
+          <li><strong>Versiones compatibles soportadas:</strong> <code>${PF_ALL:-ninguna}</code></li>
+          <li><strong>Versión recomendada:</strong> <code>${PF_BEST}</code></li>
+          </ul>
+          <p class="muted" style="margin-top:16px">Este chequeo se ejecuta antes de <code>composer install</code> para ahorrarte ver el error original de composer, que es más largo y técnico.</p>
+          </div>
+          <div class="footer">
+          Mensaje generado automáticamente por <strong>Laravel RootKit</strong> (Coolify).<br>
+          Si el problema persiste después de cambiar <code>SERVICE_PHP_VERSION</code>, verifica el valor de <code>require.php</code> en el <code>composer.json</code> del repositorio.
+          </div>
+          </div>
+          </body>
+          </html>
+          HTMLEOF
+
+            # Make sure nginx (running as the nginx user in the
+            # sibling container) can read the error page via the
+            # shared laravel-files volume.
+            chmod 644 /var/www/html/public/_coolify_preflight_error.html 2>/dev/null || true
+            chown -R www-data:www-data /var/www/html/public 2>/dev/null || true
+
+            # Skip composer, npm, artisan — the error page is ready
+            # and nginx will serve it via its try_files fallback.
+            # We still exec supervisord so php-fpm comes up (otherwise
+            # nginx can't proxy requests at all). Scheduler and queue
+            # worker will noisily fail without vendor, but that is the
+            # same behaviour as when composer install itself fails,
+            # so we are not regressing anything.
+            echo "Pre-flight failed — starting supervisor so nginx can serve the error page."
+            exec /usr/bin/supervisord -c /etc/supervisord.conf
+          fi
+          # ============================================================
+          # END pre-flight PHP version check
+          # ============================================================
+
           if [ -f composer.json ]; then
             echo "Installing Composer dependencies..."
             set +e
@@ -632,7 +1049,20 @@ services:
               set $php_upstream "laravel:9000";
 
               location / {
-                  try_files $uri $uri/ /index.php?$query_string;
+                  # Pre-flight error page intercept. When the laravel
+                  # container's entrypoint detects a PHP version
+                  # mismatch (composer.json requires a version this
+                  # container does not run) it writes a Spanish
+                  # step-by-step error page to
+                  # public/_coolify_preflight_error.html and skips
+                  # composer install. This try_files serves that
+                  # page first so the user sees actionable
+                  # instructions instead of a 500 / raw PHP error.
+                  # On a successful redeploy the entrypoint deletes
+                  # the file and this line becomes a silent no-op
+                  # (try_files falls through to the normal Laravel
+                  # routing).
+                  try_files /_coolify_preflight_error.html $uri $uri/ /index.php?$query_string;
               }
 
               location ~ \.php$ {
