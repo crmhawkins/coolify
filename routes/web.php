@@ -332,26 +332,16 @@ Route::middleware(['auth', 'verified'])->group(function () {
     // Team-wide "Backups" feature: one sidebar entry under Servers,
     // gated to non-client users via restrict.client middleware.
     // Download route streams the tarball for a completed local run.
+    // The download target is a dedicated invokable controller
+    // (not a closure) so it survives `php artisan route:cache` in
+    // production Coolify deployments.
     Route::get('/backups', \App\Livewire\Backups\Index::class)
         ->name('backups.index')
         ->middleware('restrict.client');
-    Route::get('/backups/download/{id}', function (int $id) {
-        if (auth()->user()?->isClient()) {
-            abort(403, 'Los clientes no pueden descargar backups globales.');
-        }
-        $teamId = (int) (currentTeam()?->id ?? 0);
-        $run = \App\Models\TeamBackupRun::where('id', $id)
-            ->where('team_id', $teamId)
-            ->where('destination', 'local')
-            ->where('status', 'completed')
-            ->firstOrFail();
-        $path = (string) $run->artifact_path;
-        if ($path === '' || ! is_file($path)) {
-            abort(404, 'El archivo de backup ya no existe en disco.');
-        }
-
-        return response()->download($path, basename($path));
-    })->name('backups.download')->middleware('restrict.client');
+    Route::get('/backups/download/{id}', \App\Http\Controllers\BackupsDownloadController::class)
+        ->name('backups.download')
+        ->middleware('restrict.client')
+        ->where('id', '[0-9]+');
 
     Route::prefix('server/{server_uuid}')->middleware('restrict.client')->group(function () {
         Route::get('/', ServerShow::class)->name('server.show');
