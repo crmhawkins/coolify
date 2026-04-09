@@ -305,6 +305,13 @@ class RunLocalBackup
     /**
      * Archive persistent volumes (or whole container web roots,
      * depending on local_file_mode) into /files as tarballs.
+     *
+     * IMPORTANT: every query here is a straight whereHas by the
+     * team_id we loaded in handle() — we CANNOT use Coolify's
+     * Application::ownedByCurrentTeamCached() helper because it
+     * calls currentTeam()->id internally, and currentTeam() is
+     * null inside a queue worker (no auth session), which blows
+     * up with "Attempt to read property 'id' on null".
      */
     private function archiveAllFiles(): void
     {
@@ -312,15 +319,22 @@ class RunLocalBackup
         $mode = $this->settings->local_file_mode;
 
         // Applications
-        foreach (Application::ownedByCurrentTeamCached() ?? Application::whereHas('environment.project.team', fn ($q) => $q->where('id', $teamId))->get() as $app) {
-            $this->archiveResource($app, 'app-'.str($app->name)->slug(), $mode);
+        $applications = Application::whereHas('environment.project.team', fn ($q) => $q->where('id', $teamId))->get();
+        foreach ($applications as $app) {
+            $this->archiveResource($app, 'app-'.str($app->name ?? 'app')->slug(), $mode);
         }
 
         // Services (apps + databases inside compose). We archive at
         // the ServiceApplication level because that's where the
         // persistent volumes hang and where /var/www/html lives.
-        foreach (ServiceApplication::whereHas('service.environment.project.team', fn ($q) => $q->where('id', $teamId))->get() as $svcApp) {
-            $this->archiveResource($svcApp, 'svc-'.str($svcApp->service->name.'-'.$svcApp->name)->slug(), $mode);
+        $svcApps = ServiceApplication::whereHas('service.environment.project.team', fn ($q) => $q->where('id', $teamId))->get();
+        foreach ($svcApps as $svcApp) {
+            // Guard against orphaned service relations just in
+            // case — if service was deleted between the whereHas
+            // and the get() we'd blow up on ->service->name.
+            $svcName = $svcApp->service?->name ?? 'service';
+            $slug = 'svc-'.str($svcName.'-'.($svcApp->name ?? 'app'))->slug();
+            $this->archiveResource($svcApp, $slug, $mode);
         }
     }
 

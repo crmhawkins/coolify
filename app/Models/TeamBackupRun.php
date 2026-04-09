@@ -40,6 +40,13 @@ class TeamBackupRun extends Model
     /**
      * Duration in seconds, or null if the run hasn't finished yet.
      * Used to compute ETA for the next run of the same destination.
+     *
+     * Carbon 3 returns a SIGNED float from diffInSeconds (positive
+     * when the argument is in the future, negative when in the
+     * past) so we wrap in abs() + int cast to guarantee a non-
+     * negative integer. A previous bug here produced "23:59:15"
+     * displayed durations for short runs because gmdate('H:i:s',
+     * -45) wraps around to 23:59:15.
      */
     public function durationSeconds(): ?int
     {
@@ -47,7 +54,7 @@ class TeamBackupRun extends Model
             return null;
         }
 
-        return $this->finished_at->diffInSeconds($this->started_at);
+        return (int) abs($this->started_at->diffInSeconds($this->finished_at));
     }
 
     /**
@@ -76,7 +83,7 @@ class TeamBackupRun extends Model
         foreach ($runs as $run) {
             $d = $run->durationSeconds();
             if ($d !== null && $d > 0) {
-                $total += $d;
+                $total += (int) $d;
                 $count++;
             }
         }

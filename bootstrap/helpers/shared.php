@@ -94,14 +94,35 @@ function custom_backup_dir(): string
  * Returns null on failure so the caller can render a friendly
  * "couldn't read disk usage" hint instead of crashing the UI.
  *
+ * Walks UP the given path until it finds a directory that actually
+ * exists inside the Coolify container — otherwise disk_free_space()
+ * returns false on a path that hasn't been created yet (e.g. the
+ * backups "custom" subdir before the first run), which would show
+ * as "desconocido" in the UI even though the disk is perfectly
+ * readable one level above.
+ *
  * This is a local-only helper — for remote servers use the server
  * exec path and `df -B1` directly, same command, just over SSH.
  */
 function coolify_host_free_bytes(string $path = '/'): ?int
 {
-    $bytes = @disk_free_space($path);
+    $candidate = $path === '' ? '/' : $path;
+    // Safety cap so we don't spin forever on weird input.
+    for ($i = 0; $i < 10; $i++) {
+        if (is_dir($candidate)) {
+            $bytes = @disk_free_space($candidate);
+            if ($bytes !== false) {
+                return (int) $bytes;
+            }
+        }
+        $parent = dirname($candidate);
+        if ($parent === $candidate) {
+            break;
+        }
+        $candidate = $parent;
+    }
 
-    return $bytes === false ? null : (int) $bytes;
+    return null;
 }
 /**
  * Total size of a directory ON THE COOLIFY HOST, walked recursively.
