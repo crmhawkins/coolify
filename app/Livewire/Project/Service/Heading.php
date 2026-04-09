@@ -131,7 +131,18 @@ class Heading extends Component
         }
     }
 
-    public function restart()
+    /**
+     * Full redeploy: stops the service, runs the start pipeline again
+     * (which re-parses the compose file, recreates containers and
+     * reapplies env vars). This is what the old "Restart" button did
+     * even though the name was misleading — a bare `docker restart`
+     * would not pick up .env or php.ini changes.
+     *
+     * Environment variables, persistent storages and everything else
+     * mounted via bind volumes survive because we only stop+start the
+     * same compose stack; no volumes are removed.
+     */
+    public function redeploy()
     {
         $this->checkDeployments();
         if ($this->isDeploymentProgress) {
@@ -141,6 +152,39 @@ class Heading extends Component
         }
         $activity = StartService::run($this->service, stopBeforeStart: true);
         $this->dispatch('activityMonitor', $activity->id);
+    }
+
+    /**
+     * Lightweight restart: issues `docker restart` on each container
+     * that belongs to this service (applications + databases) without
+     * rebuilding or re-running the deploy pipeline. Use when a single
+     * container has gone unhealthy and you just want to kick it, not
+     * when you actually changed config or code.
+     */
+    public function restart()
+    {
+        try {
+            $restarted = 0;
+            foreach ($this->service->applications as $application) {
+                $application->restart();
+                $restarted++;
+            }
+            foreach ($this->service->databases as $database) {
+                $database->restart();
+                $restarted++;
+            }
+
+            if ($restarted === 0) {
+                $this->dispatch('warning', 'No hay contenedores que reiniciar.');
+
+                return;
+            }
+
+            $noun = $restarted === 1 ? 'contenedor reiniciado' : 'contenedores reiniciados';
+            $this->dispatch('success', "{$restarted} {$noun}.");
+        } catch (\Throwable $e) {
+            $this->dispatch('error', 'Error reiniciando contenedores: '.$e->getMessage());
+        }
     }
 
     public function pullAndRestartEvent()

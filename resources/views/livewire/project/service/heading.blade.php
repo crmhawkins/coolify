@@ -34,13 +34,36 @@
             <div class="flex flex-wrap order-first gap-2 items-center sm:order-last">
                 <x-services.advanced :service="$service" />
                 @if (str($service->status)->contains('running'))
-                    <x-forms.button title="Restart" @click="$wire.dispatch('restartEvent')">
+                    {{-- Redeploy: full stop + start pipeline. Picks up
+                         .env / php.ini / compose changes. Previously
+                         mislabelled as "Restart". --}}
+                    <x-forms.button title="Redeploy (stop + start pipeline)"
+                        @click="$wire.dispatch('redeployEvent')">
                         <svg class="w-5 h-5 dark:text-warning" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                             <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
                                 stroke-width="2">
                                 <path d="M19.933 13.041 a8 8 0 1 1-9.925-8.788c3.899-1 7.935 1.007 9.425 4.747" />
                                 <path d="M20 4v5h-5" />
                             </g>
+                        </svg>
+                        Redeploy
+                    </x-forms.button>
+                    {{-- Restart: plain `docker restart` on each
+                         container, no rebuild. Use when something has
+                         gone unhealthy and you just want to kick it. --}}
+                    <x-forms.button title="Restart (docker restart, sin rebuild)"
+                        @click="$wire.dispatch('restartEvent')">
+                        <svg class="w-5 h-5 dark:text-success" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
+                            fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                            stroke-width="2">
+                            <path d="M12 2v4" />
+                            <path d="m16.2 7.8 2.9-2.9" />
+                            <path d="M18 12h4" />
+                            <path d="m16.2 16.2 2.9 2.9" />
+                            <path d="M12 18v4" />
+                            <path d="m4.9 19.1 2.9-2.9" />
+                            <path d="M2 12h4" />
+                            <path d="m4.9 4.9 2.9 2.9" />
                         </svg>
                         Restart
                     </x-forms.button>
@@ -62,13 +85,33 @@
                         </x-slot:button-title>
                     </x-modal-confirmation>
                 @elseif (str($service->status)->contains('degraded'))
-                    <x-forms.button title="Restart" @click="$wire.dispatch('restartEvent')">
+                    {{-- Same Redeploy + Restart pair as the running
+                         branch above; degraded just means one container
+                         is unhappy, the actions are the same. --}}
+                    <x-forms.button title="Redeploy (stop + start pipeline)"
+                        @click="$wire.dispatch('redeployEvent')">
                         <svg class="w-5 h-5 dark:text-warning" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                             <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
                                 stroke-width="2">
                                 <path d="M19.933 13.041a8 8 0 1 1-9.925-8.788c3.899-1 7.935 1.007 9.425 4.747" />
                                 <path d="M20 4v5h-5" />
                             </g>
+                        </svg>
+                        Redeploy
+                    </x-forms.button>
+                    <x-forms.button title="Restart (docker restart, sin rebuild)"
+                        @click="$wire.dispatch('restartEvent')">
+                        <svg class="w-5 h-5 dark:text-success" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
+                            fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"
+                            stroke-width="2">
+                            <path d="M12 2v4" />
+                            <path d="m16.2 7.8 2.9-2.9" />
+                            <path d="M18 12h4" />
+                            <path d="m16.2 16.2 2.9 2.9" />
+                            <path d="M12 18v4" />
+                            <path d="m4.9 19.1 2.9-2.9" />
+                            <path d="M2 12h4" />
+                            <path d="m4.9 4.9 2.9 2.9" />
                         </svg>
                         Restart
                     </x-forms.button>
@@ -160,7 +203,10 @@
                 window.dispatchEvent(new CustomEvent('startservice'));
                 $wire.$call('forceDeploy');
             });
-            $wire.$on('restartEvent', async () => {
+            // Redeploy: the old "restart" flow — stop + start pipeline
+            // with progress slide-over. This is what the Redeploy button
+            // in the header dispatches now.
+            $wire.$on('redeployEvent', async () => {
                 const isDeploymentProgress = await $wire.$call('checkDeployments');
                 if (isDeploymentProgress) {
                     $wire.$dispatch('error',
@@ -169,8 +215,16 @@
                     return;
                 }
                 $wire.$dispatch('info',
-                    'Gracefully stopping service.<br/><br/>It could take a while depending on the service.');
+                    'Redesplegando servicio.<br/><br/>Puede tardar un poco.');
                 window.dispatchEvent(new CustomEvent('startservice'));
+                $wire.$call('redeploy');
+            });
+
+            // Restart: plain `docker restart` per container, no rebuild,
+            // no progress slide-over (it is fast enough to resolve in
+            // the success/error toast alone).
+            $wire.$on('restartEvent', () => {
+                $wire.$dispatch('info', 'Reiniciando contenedores…');
                 $wire.$call('restart');
             });
             $wire.$on('pullAndRestartEvent', () => {
