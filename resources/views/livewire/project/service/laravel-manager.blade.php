@@ -129,6 +129,66 @@
                                     </svg>
                                     Cargando archivo .env…
                                 </div>
+                            @elseif ($selectedEnvContainerType === 'phpmyadmin')
+                                {{-- phpMyAdmin does not mount Laravel's
+                                     /var/www/html volume, so there is no
+                                     .env file for us to edit here. Its
+                                     configuration lives in the docker-
+                                     compose env vars (PMA_HOST, etc).
+                                     We render a friendly info card
+                                     explaining that and stop. --}}
+                                <div
+                                    class="rounded-md px-5 py-6 flex items-start gap-3"
+                                    style="background-color:#101013;border:1px dashed #3f3f46;color:#a1a1aa;"
+                                >
+                                    <svg class="w-6 h-6 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#86efac;">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                                    </svg>
+                                    <div class="min-w-0">
+                                        <div class="text-sm font-semibold mb-1" style="color:#ffffff;">No hace falta tocar nada aquí</div>
+                                        <p class="text-xs leading-relaxed">
+                                            <span class="font-mono" style="color:#c4b5fd;">phpmyadmin</span>
+                                            no usa un <span class="font-mono">.env</span> de Laravel.
+                                            Su configuración (host de base de datos, usuario, contraseña…) se define con
+                                            variables de entorno en el <span class="font-mono">docker-compose.yml</span> del servicio
+                                            (<span class="font-mono" style="color:#c4b5fd;">PMA_HOST</span>,
+                                            <span class="font-mono" style="color:#c4b5fd;">PMA_USER</span>,
+                                            <span class="font-mono" style="color:#c4b5fd;">PMA_PASSWORD</span>).
+                                            Si necesitas editar el <span class="font-mono">.env</span> de Laravel, selecciona arriba el contenedor
+                                            <span class="font-mono" style="color:#c4b5fd;">laravel</span>.
+                                        </p>
+                                    </div>
+                                </div>
+                            @elseif ($selectedEnvContainerType === 'nginx')
+                                {{-- nginx shares the /var/www/html volume
+                                     with the laravel container, so the
+                                     file at /var/www/html/.env is the
+                                     exact same physical file from both
+                                     sides. To keep a single canonical
+                                     source of truth we redirect the user
+                                     to the laravel container instead of
+                                     rendering a second editor for the
+                                     same file. --}}
+                                <div
+                                    class="rounded-md px-5 py-6 flex items-start gap-3"
+                                    style="background-color:#101013;border:1px dashed #3f3f46;color:#a1a1aa;"
+                                >
+                                    <svg class="w-6 h-6 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#86efac;">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                    </svg>
+                                    <div class="min-w-0">
+                                        <div class="text-sm font-semibold mb-1" style="color:#ffffff;">nginx comparte el <span class="font-mono">.env</span> con laravel</div>
+                                        <p class="text-xs leading-relaxed">
+                                            Los contenedores <span class="font-mono" style="color:#c4b5fd;">nginx</span>
+                                            y <span class="font-mono" style="color:#c4b5fd;">laravel</span>
+                                            montan el mismo volumen <span class="font-mono">/var/www/html</span>, así que
+                                            <span class="font-mono">/var/www/html/.env</span> es literalmente el mismo fichero
+                                            desde ambos lados. Para evitar confusiones y tener una única fuente de verdad,
+                                            edita el <span class="font-mono">.env</span> desde el contenedor
+                                            <span class="font-mono" style="color:#c4b5fd;">laravel</span>.
+                                        </p>
+                                    </div>
+                                </div>
                             @elseif (!$envFileExists)
                                 <div
                                     class="rounded px-3 py-2 text-xs"

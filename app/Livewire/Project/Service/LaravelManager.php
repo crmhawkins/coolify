@@ -64,6 +64,13 @@ class LaravelManager extends Component
     public string $selectedContainerType = '';
 
     /**
+     * Same idea as selectedContainerType but for the .env editor card.
+     * Kept as a separate property so changing the ini selector does
+     * not clobber the env selector state (and vice versa).
+     */
+    public string $selectedEnvContainerType = '';
+
+    /**
      * PHP ini keys the Laravel Manager exposes in the editor, in the order
      * they appear in the UI. Every key has a sensible default tuned for a
      * Laravel Rootkit production container (Apartamentos-class apps that
@@ -210,11 +217,34 @@ class LaravelManager extends Component
         $this->isLoadingEnv = true;
         $this->envContent = '';
         $this->envFileExists = true;
+        $this->selectedEnvContainerType = '';
 
         try {
             $container = collect($this->laravelContainers)->firstWhere('id', $this->selectedContainerForEnv);
             if (! $container) {
                 $this->dispatch('error', 'Container not found.');
+                $this->isLoadingEnv = false;
+
+                return;
+            }
+
+            $this->selectedEnvContainerType = $this->determineContainerType($container);
+
+            // Short-circuit for containers that are not the canonical
+            // home of the Laravel .env file:
+            //
+            //  - nginx SHARES the same /var/www/html volume as laravel,
+            //    so editing the file from nginx is functionally the
+            //    same as editing it from laravel. We still stop here
+            //    and point the user to the laravel container so there
+            //    is a single canonical source of truth in the UI.
+            //
+            //  - phpmyadmin does NOT mount /var/www/html at all — its
+            //    config lives in the docker-compose env vars, not in
+            //    a Laravel-style .env file, so reading the path would
+            //    just return "notfound" and render the (misleading)
+            //    "Este proyecto no tiene .env" warning.
+            if ($this->selectedEnvContainerType === 'nginx' || $this->selectedEnvContainerType === 'phpmyadmin') {
                 $this->isLoadingEnv = false;
 
                 return;
