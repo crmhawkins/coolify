@@ -8,10 +8,10 @@ use App\Actions\Service\RegenerateSslForService;
 |--------------------------------------------------------------------------
 |
 | Covers the pure-logic bits of the Re-SSL button flow: FQDN
-| normalisation, the embedded PHP pruning script, and the Heading.php
-| wiring. SSH / docker / acme.json interactions are NOT exercised here
-| because they require a real proxy — those are exercised in a manual
-| smoke test and in production.
+| normalisation, the in-process acme.json pruner, and the Heading.php
+| wiring. SSH and actual docker/Traefik interactions are not exercised
+| here — those require a real proxy and are verified manually in
+| production.
 |
 */
 
@@ -46,143 +46,167 @@ it('normaliseFqdn returns empty on empty input', function () {
 });
 
 /* -----------------------------------------------------------------
- | Embedded prune script: shape + behaviour
- | ----------------------------------------------------------------- */
+ | pruneAcmeJson: core pruning logic
+ | -----------------------------------------------------------------
+ |
+ | The pruner runs in-process inside the Coolify Livewire worker, not
+ | in a remote shell script. That lets us unit-test it directly with
+ | synthetic acme.json payloads without touching SSH or docker. This
+ | is the key change vs the previous "upload PHP script, run with
+ | `php`" design — the new version is both easier to test AND doesn't
+ | require PHP on the remote host.
+ */
 
-it('buildPrunePhpScript returns a valid PHP script with the expected pruning logic', function () {
-    $script = (new RegenerateSslForService())->buildPrunePhpScript();
+it('pruneAcmeJson removes certificates whose main domain matches a target', function () {
+    $action = new RegenerateSslForService();
 
-    expect($script)
-        // Starts with <?php and defines the out() helper
-        ->toStartWith('<?php')
-        ->toContain('function out(')
-        // Reads argv[1] = acme path, argv[2] = target fqdns
-        ->toContain("\$acmePath = \$argv[1]")
-        ->toContain("\$targetsRaw = \$argv[2]")
-        // Decodes acme.json and iterates resolvers / certificates
-        ->toContain("json_decode(")
-        ->toContain("'Certificates'")
-        // Matches on domain.main AND domain.sans
-        ->toContain("'main'")
-        ->toContain("'sans'")
-        // Atomic write (tmp + rename) + chmod 0600 per Traefik requirement
-        ->toContain('.coolify-tmp')
-        ->toContain('chmod($tmpPath, 0600)')
-        ->toContain('rename($tmpPath, $acmePath)')
-        // JSON output with removed/kept counts
-        ->toContain("'removed'")
-        ->toContain("'kept'");
-});
-
-it('buildPrunePhpScript is syntactically valid PHP', function () {
-    $script = (new RegenerateSslForService())->buildPrunePhpScript();
-
-    // Save to a temp file and ask the local PHP binary to lint it.
-    $tmp = tempnam(sys_get_temp_dir(), 'coolify-prune-test-').'.php';
-    file_put_contents($tmp, $script);
-    try {
-        $output = [];
-        $returnVar = 0;
-        exec('php -l '.escapeshellarg($tmp).' 2>&1', $output, $returnVar);
-        $joined = implode("\n", $output);
-        expect($returnVar)->toBe(0, 'Embedded prune script failed php -l: '.$joined);
-        expect($joined)->toContain('No syntax errors detected');
-    } finally {
-        @unlink($tmp);
-    }
-});
-
-it('embedded prune script correctly prunes matching certificates and keeps the rest', function () {
-    // Run the embedded script against a synthetic acme.json with 3
-    // certificates and verify only the matching ones are removed.
-    $script = (new RegenerateSslForService())->buildPrunePhpScript();
-
-    $scriptPath = tempnam(sys_get_temp_dir(), 'coolify-prune-script-').'.php';
-    $acmePath = tempnam(sys_get_temp_dir(), 'coolify-acme-test-').'.json';
-    file_put_contents($scriptPath, $script);
-    file_put_contents($acmePath, json_encode([
+    $acme = json_encode([
         'letsencrypt' => [
             'Account' => ['Email' => 'test@example.com'],
             'Certificates' => [
-                [
-                    'domain' => ['main' => 'casadelavirgen.hawkins.es', 'sans' => ['www.casadelavirgen.hawkins.es']],
-                    'certificate' => 'PEM_A',
-                    'key' => 'KEY_A',
-                ],
-                [
-                    'domain' => ['main' => 'other-site.example.com', 'sans' => []],
-                    'certificate' => 'PEM_B',
-                    'key' => 'KEY_B',
-                ],
-                [
-                    'domain' => ['main' => 'apartamentos.hawkins.es'],
-                    'certificate' => 'PEM_C',
-                    'key' => 'KEY_C',
-                ],
-            ],
-        ],
-    ]));
-
-    try {
-        $output = [];
-        $returnVar = 0;
-        exec(
-            'php '.escapeshellarg($scriptPath).' '.escapeshellarg($acmePath)
-            .' '.escapeshellarg('casadelavirgen.hawkins.es,www.casadelavirgen.hawkins.es').' 2>&1',
-            $output,
-            $returnVar
-        );
-
-        $joined = implode("\n", $output);
-        $payload = json_decode(trim($joined), true);
-
-        expect($payload)->toBeArray();
-        expect($payload['ok'] ?? false)->toBeTrue("Script failed: $joined");
-        expect($payload['removed'] ?? null)->toBe(1);
-        expect($payload['kept'] ?? null)->toBe(2);
-
-        // Verify the file was actually rewritten with only the kept certs.
-        $pruned = json_decode((string) file_get_contents($acmePath), true);
-        $remaining = $pruned['letsencrypt']['Certificates'] ?? [];
-        expect(count($remaining))->toBe(2);
-
-        $mains = array_map(fn ($c) => $c['domain']['main'] ?? '', $remaining);
-        expect($mains)->toContain('other-site.example.com');
-        expect($mains)->toContain('apartamentos.hawkins.es');
-        expect($mains)->not->toContain('casadelavirgen.hawkins.es');
-    } finally {
-        @unlink($scriptPath);
-        @unlink($acmePath);
-    }
-});
-
-it('embedded prune script reports "no matches" when nothing matches but leaves the file intact', function () {
-    $script = (new RegenerateSslForService())->buildPrunePhpScript();
-
-    $scriptPath = tempnam(sys_get_temp_dir(), 'coolify-prune-script-').'.php';
-    $acmePath = tempnam(sys_get_temp_dir(), 'coolify-acme-test-').'.json';
-    file_put_contents($scriptPath, $script);
-
-    $originalJson = json_encode([
-        'letsencrypt' => [
-            'Certificates' => [
-                ['domain' => ['main' => 'kept-site.example.com', 'sans' => []], 'certificate' => 'PEM', 'key' => 'KEY'],
+                ['domain' => ['main' => 'findpartners.es', 'sans' => []], 'certificate' => 'PEM_A', 'key' => 'KEY_A'],
+                ['domain' => ['main' => 'other.example.com', 'sans' => []], 'certificate' => 'PEM_B', 'key' => 'KEY_B'],
+                ['domain' => ['main' => 'another.example.com'], 'certificate' => 'PEM_C', 'key' => 'KEY_C'],
             ],
         ],
     ]);
-    file_put_contents($acmePath, $originalJson);
 
-    try {
-        exec('php '.escapeshellarg($scriptPath).' '.escapeshellarg($acmePath).' '.escapeshellarg('nomatch.example.com').' 2>&1', $output);
-        $payload = json_decode(trim(implode("\n", $output)), true);
-        expect($payload['ok'] ?? false)->toBeTrue();
-        expect($payload['removed'] ?? null)->toBe(0);
-        // File unchanged — the script only rewrites when removed > 0.
-        expect(trim((string) file_get_contents($acmePath)))->toBe(trim($originalJson));
-    } finally {
-        @unlink($scriptPath);
-        @unlink($acmePath);
-    }
+    $result = $action->pruneAcmeJson($acme, ['findpartners.es']);
+
+    expect($result)->not->toBeNull();
+    expect($result['removed'])->toBe(1);
+    expect($result['kept'])->toBe(2);
+
+    $decoded = json_decode($result['content'], true);
+    $mains = array_map(fn ($c) => $c['domain']['main'] ?? '', $decoded['letsencrypt']['Certificates']);
+    expect($mains)->toContain('other.example.com');
+    expect($mains)->toContain('another.example.com');
+    expect($mains)->not->toContain('findpartners.es');
+});
+
+it('pruneAcmeJson also matches on SANs (multi-domain certs)', function () {
+    $action = new RegenerateSslForService();
+
+    $acme = json_encode([
+        'letsencrypt' => [
+            'Certificates' => [
+                [
+                    'domain' => [
+                        'main' => 'crm.apartamentosalgeciras.com',
+                        'sans' => ['apartamentosalgeciras.com', 'www.apartamentosalgeciras.com'],
+                    ],
+                    'certificate' => 'PEM_COMBINED',
+                ],
+                [
+                    'domain' => ['main' => 'other.example.com', 'sans' => []],
+                    'certificate' => 'PEM_OTHER',
+                ],
+            ],
+        ],
+    ]);
+
+    // Match on a SAN, not on the main domain.
+    $result = $action->pruneAcmeJson($acme, ['www.apartamentosalgeciras.com']);
+
+    expect($result['removed'])->toBe(1);
+    expect($result['kept'])->toBe(1);
+
+    $decoded = json_decode($result['content'], true);
+    $mains = array_map(fn ($c) => $c['domain']['main'] ?? '', $decoded['letsencrypt']['Certificates']);
+    expect($mains)->toBe(['other.example.com']);
+});
+
+it('pruneAcmeJson is case-insensitive on both main and SANs', function () {
+    $action = new RegenerateSslForService();
+
+    $acme = json_encode([
+        'letsencrypt' => [
+            'Certificates' => [
+                ['domain' => ['main' => 'FINDPARTNERS.ES', 'sans' => []], 'certificate' => 'PEM'],
+            ],
+        ],
+    ]);
+
+    $result = $action->pruneAcmeJson($acme, ['findpartners.es']);
+    expect($result['removed'])->toBe(1);
+    expect($result['kept'])->toBe(0);
+});
+
+it('pruneAcmeJson returns removed=0 and leaves content untouched when nothing matches', function () {
+    $action = new RegenerateSslForService();
+
+    $original = json_encode([
+        'letsencrypt' => [
+            'Certificates' => [
+                ['domain' => ['main' => 'keep-me.example.com', 'sans' => []], 'certificate' => 'PEM'],
+            ],
+        ],
+    ]);
+
+    $result = $action->pruneAcmeJson($original, ['nomatch.example.com']);
+
+    expect($result['removed'])->toBe(0);
+    expect($result['kept'])->toBe(1);
+
+    // Content is re-encoded but semantically identical.
+    $originalDecoded = json_decode($original, true);
+    $resultDecoded = json_decode($result['content'], true);
+    expect($resultDecoded)->toBe($originalDecoded);
+});
+
+it('pruneAcmeJson returns null on invalid JSON', function () {
+    $action = new RegenerateSslForService();
+
+    expect($action->pruneAcmeJson('not-json-at-all', ['foo.example.com']))->toBeNull();
+    expect($action->pruneAcmeJson('', ['foo.example.com']))->toBeNull();
+    expect($action->pruneAcmeJson('{', ['foo.example.com']))->toBeNull();
+});
+
+it('pruneAcmeJson handles multiple resolvers in the same acme.json', function () {
+    $action = new RegenerateSslForService();
+
+    $acme = json_encode([
+        'letsencrypt' => [
+            'Certificates' => [
+                ['domain' => ['main' => 'findpartners.es', 'sans' => []], 'certificate' => 'PEM1'],
+                ['domain' => ['main' => 'keep1.example.com', 'sans' => []], 'certificate' => 'PEM2'],
+            ],
+        ],
+        'zerossl' => [
+            'Certificates' => [
+                ['domain' => ['main' => 'findpartners.es', 'sans' => []], 'certificate' => 'PEM3'],
+                ['domain' => ['main' => 'keep2.example.com', 'sans' => []], 'certificate' => 'PEM4'],
+            ],
+        ],
+    ]);
+
+    $result = $action->pruneAcmeJson($acme, ['findpartners.es']);
+    // One match per resolver.
+    expect($result['removed'])->toBe(2);
+    expect($result['kept'])->toBe(2);
+
+    $decoded = json_decode($result['content'], true);
+    expect(count($decoded['letsencrypt']['Certificates']))->toBe(1);
+    expect(count($decoded['zerossl']['Certificates']))->toBe(1);
+    expect($decoded['letsencrypt']['Certificates'][0]['domain']['main'])->toBe('keep1.example.com');
+    expect($decoded['zerossl']['Certificates'][0]['domain']['main'])->toBe('keep2.example.com');
+});
+
+it('pruneAcmeJson ignores resolvers with no Certificates array (e.g. only an Account block)', function () {
+    $action = new RegenerateSslForService();
+
+    $acme = json_encode([
+        'letsencrypt' => [
+            'Account' => ['Email' => 'a@b.c'],
+            // No Certificates key at all yet — this happens right
+            // after Traefik creates the account but before any cert
+            // has been issued.
+        ],
+    ]);
+
+    $result = $action->pruneAcmeJson($acme, ['any.example.com']);
+    expect($result['removed'])->toBe(0);
+    expect($result['kept'])->toBe(0);
 });
 
 /* -----------------------------------------------------------------
@@ -217,7 +241,7 @@ it('heading.blade.php renders the Re-SSL button in both running and degraded bra
 it('Re-SSL action is surgical: never touches other services on the same server', function () {
     $source = file_get_contents(__DIR__.'/../../app/Actions/Service/RegenerateSslForService.php');
 
-    // The prune script must iterate Certificates and only drop those
+    // pruneAcmeJson must iterate Certificates and only drop those
     // whose main/sans match the target FQDNs. A global wipe would
     // contain things like `unset($data[$resolver]['Certificates'])`
     // or `$data[$resolver]['Certificates'] = []` unconditionally.
@@ -227,13 +251,58 @@ it('Re-SSL action is surgical: never touches other services on the same server',
         ->toContain("\$data[\$resolver]['Certificates'] = \$newCerts")
         // The match logic uses in_array against the target list.
         ->toContain('in_array($main, $targets')
-        // And the FQDN collector only reads from $service->applications,
+        // The FQDN collector only reads from $service->applications,
         // never iterates servers or databases globally.
-        ->toContain('foreach ($service->applications as $application)');
+        ->toContain('foreach ($service->applications as $application)')
+        // Only restarts containers that actually expose a FQDN —
+        // databases without a domain are skipped so they do not
+        // cycle unnecessarily.
+        ->toContain("\$fqdnRaw = (string) (\$application->fqdn ?? '')");
 
-    // Sanity: no "DELETE FROM" or "rm -f acme.json" destructive
-    // patterns that would nuke everything.
+    // Sanity: no destructive wipe patterns.
     expect($source)
         ->not->toContain('rm -f /traefik/acme.json')
         ->not->toContain('rm /data/coolify/proxy/acme.json');
+});
+
+it('Re-SSL action no longer depends on a remote PHP binary', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Actions/Service/RegenerateSslForService.php');
+
+    // The previous implementation uploaded a PHP script to /tmp on
+    // the remote host and ran it with `php`. Coolify hosts do NOT
+    // have PHP installed, so that path failed in production with
+    // "Respuesta del script de poda inválida". The new path reads
+    // acme.json via `cat`, prunes in-process (Coolify PHP worker),
+    // writes it back via base64 echo.
+    expect($source)
+        // Reads via cat.
+        ->toContain('$catCmd = \'cat \'.escapeshellarg($acmePath)')
+        // Prunes in-process.
+        ->toContain('$this->pruneAcmeJson($raw, $fqdns)')
+        // Writes back atomically via base64 + tmp + mv.
+        ->toContain('echo {$b64} | base64 -d > {$tmpArg}')
+        ->toContain('chmod 600 {$tmpArg}')
+        ->toContain('mv {$tmpArg} {$acmeArg}');
+
+    // Must NOT contain the old "run php on the remote host" pattern.
+    expect($source)
+        ->not->toContain('buildPrunePhpScript')
+        ->not->toMatch('/php \{\$scriptPath\}/');
+});
+
+it('updateWpPrefix auto-detects the real prefix from WordPress core tables when wp-config.php is out of sync', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
+
+    // The rewrite adds a fallback: if SHOW TABLES LIKE oldprefix%
+    // returns empty (wp-config.php and DB are out of sync) we scan
+    // all tables and detect the real prefix by looking for core
+    // WordPress tables (*_posts, *_users, *_options, *_postmeta,
+    // *_usermeta).
+    expect($source)
+        ->toContain("\$coreSuffixes = ['_posts', '_users', '_options', '_postmeta', '_usermeta']")
+        ->toContain('Auto-detect: scan all tables')
+        ->toContain('auto-detected prefix')
+        // Still falls back to a precise error message when nothing
+        // matches.
+        ->toContain('No tables with prefix');
 });

@@ -82,9 +82,6 @@ class RegenerateSslForService
             ];
         }
 
-        // Only Traefik is supported right now. Caddy stores certs
-        // in a completely different format and Nginx does not
-        // manage certs on its own.
         if ($server->proxyType() !== ProxyTypes::TRAEFIK->value) {
             return [
                 'ok' => false,
@@ -112,12 +109,12 @@ class RegenerateSslForService
         $backupPath = $proxyPath.'/'.$backupName;
 
         try {
-            // Sanity-check that acme.json exists before we touch it.
-            $existsCheck = "test -f ".escapeshellarg($acmePath)." && echo ok || echo notfound";
+            // 1. Verify acme.json exists on the remote host. We use
+            //    a bare `test && echo ok || echo notfound` command
+            //    without any sh -c wrapper so quoting stays simple.
+            $existsCheck = 'test -f '.escapeshellarg($acmePath).' && echo ok || echo notfound';
             if ($server->isNonRoot()) {
-                $existsCheck = "sudo sh -c ".escapeshellarg($existsCheck);
-            } else {
-                $existsCheck = "sh -c ".escapeshellarg($existsCheck);
+                $existsCheck = 'sudo '.$existsCheck;
             }
             $existsResult = trim((string) (instant_remote_process([$existsCheck], $server, false) ?? ''));
             if ($existsResult !== 'ok') {
@@ -130,74 +127,87 @@ class RegenerateSslForService
                 ];
             }
 
-            // Backup first.
+            // 2. Backup acme.json before we touch it. Uses plain
+            //    `cp` on the remote host — no PHP binary required.
             $backupCmd = 'cp '.escapeshellarg($acmePath).' '.escapeshellarg($backupPath);
             if ($server->isNonRoot()) {
                 $backupCmd = "sudo {$backupCmd}";
             }
             instant_remote_process([$backupCmd], $server, false);
 
-            // Prune the target FQDN entries from acme.json via an
-            // embedded PHP helper (Traefik containers have Linux
-            // with docker but not necessarily jq — doing it in PHP
-            // from the HOST side, not the container, is simpler).
-            // We upload the script to /tmp on the host, run it
-            // with php, then remove it.
-            $script = $this->buildPrunePhpScript();
-            $scriptPath = '/tmp/coolify-re-ssl-'.uniqid('', true).'.php';
-            $scriptB64 = escapeshellarg(base64_encode($script));
-            $writeScript = 'sh -c '.escapeshellarg("echo {$scriptB64} | base64 -d > {$scriptPath}");
+            // 3. Read acme.json via `cat`. The previous implementation
+            //    tried to upload a PHP script to the remote host and
+            //    run it with the `php` binary, but Coolify hosts
+            //    don't have PHP installed — PHP lives inside the
+            //    coolify container, not on the host. The `cat` →
+            //    process in Coolify PHP → write back flow has zero
+            //    dependencies on the host toolchain.
+            $catCmd = 'cat '.escapeshellarg($acmePath);
             if ($server->isNonRoot()) {
-                $writeScript = "sudo {$writeScript}";
+                $catCmd = "sudo {$catCmd}";
             }
-            instant_remote_process([$writeScript], $server, false);
-
-            $fqdnsArg = escapeshellarg(implode(',', $fqdns));
-            $acmeArg = escapeshellarg($acmePath);
-            $runScript = "php {$scriptPath} {$acmeArg} {$fqdnsArg} 2>&1";
-            if ($server->isNonRoot()) {
-                $runScript = "sudo {$runScript}";
+            $raw = (string) (instant_remote_process([$catCmd], $server, false) ?? '');
+            if ($raw === '') {
+                return [
+                    'ok' => false,
+                    'fqdns' => $fqdns,
+                    'removed' => 0,
+                    'message' => 'acme.json está vacío o no se pudo leer.',
+                    'backup' => $backupPath,
+                ];
             }
-            $output = (string) (instant_remote_process([$runScript], $server, false) ?? '');
 
-            // Cleanup script file on the host regardless of
-            // success. Best-effort.
-            try {
-                $cleanup = 'rm -f '.escapeshellarg($scriptPath);
+            // 4. Prune the target FQDN entries from the JSON. This
+            //    runs inside the Coolify PHP process, not on the
+            //    remote host — all the tricky logic lives in
+            //    prunAcmeJson() which is easy to unit-test.
+            $pruned = $this->pruneAcmeJson($raw, $fqdns);
+            if ($pruned === null) {
+                return [
+                    'ok' => false,
+                    'fqdns' => $fqdns,
+                    'removed' => 0,
+                    'message' => 'acme.json parsing failed — file is not valid JSON. The backup is intact and unchanged.',
+                    'backup' => $backupPath,
+                ];
+            }
+
+            $removed = (int) $pruned['removed'];
+            $kept = (int) $pruned['kept'];
+
+            if ($removed === 0) {
+                // Nothing matched — still useful to fall through to
+                // the restart step because the cert may be stuck in
+                // "pending" state and just need an ACME retry.
+                $newContent = $raw;
+            } else {
+                $newContent = (string) $pruned['content'];
+
+                // 5. Write the pruned JSON back via base64 round-trip
+                //    so we never have to worry about quoting. We
+                //    write to a .tmp path first and then mv so
+                //    Traefik never reads a half-written file (it
+                //    polls acme.json periodically). chmod 0600 is
+                //    Traefik's required permission.
+                $tmpPath = $acmePath.'.coolify-tmp';
+                $b64 = escapeshellarg(base64_encode($newContent));
+                $tmpArg = escapeshellarg($tmpPath);
+                $acmeArg = escapeshellarg($acmePath);
+
+                $writeCmd = "echo {$b64} | base64 -d > {$tmpArg} && chmod 600 {$tmpArg} && mv {$tmpArg} {$acmeArg}";
                 if ($server->isNonRoot()) {
-                    $cleanup = "sudo {$cleanup}";
+                    $writeCmd = "sudo sh -c ".escapeshellarg($writeCmd);
                 }
-                instant_remote_process([$cleanup], $server, false);
-            } catch (\Throwable) {
+                instant_remote_process([$writeCmd], $server, false);
             }
 
-            $payload = json_decode(trim($output), true);
-            if (! is_array($payload) || ! isset($payload['ok'])) {
-                return [
-                    'ok' => false,
-                    'fqdns' => $fqdns,
-                    'removed' => 0,
-                    'message' => 'Respuesta del script de poda inválida: '.substr($output, 0, 300),
-                    'backup' => $backupPath,
-                ];
-            }
-            if ($payload['ok'] !== true) {
-                return [
-                    'ok' => false,
-                    'fqdns' => $fqdns,
-                    'removed' => 0,
-                    'message' => (string) ($payload['message'] ?? 'Error podando acme.json'),
-                    'backup' => $backupPath,
-                ];
-            }
-
-            $removed = (int) ($payload['removed'] ?? 0);
-
-            // Signal SIGHUP to Traefik so it picks up the new
-            // acme.json immediately. Traefik's default signal
-            // handler reloads the dynamic config on SIGHUP. Fails
-            // silently if the proxy container is not running.
-            $reloadCmd = "docker kill --signal=SIGHUP coolify-proxy 2>/dev/null || true";
+            // 6. SIGHUP the proxy so Traefik picks up the new
+            //    acme.json immediately. Non-fatal if the container
+            //    isn't named coolify-proxy (swarm setups, custom
+            //    names) — we log and move on to the container
+            //    restart step which kicks Traefik via the label
+            //    reread path anyway.
+            $reloadCmd = 'docker kill --signal=SIGHUP coolify-proxy 2>/dev/null || true';
             if ($server->isNonRoot()) {
                 $reloadCmd = "sudo {$reloadCmd}";
             }
@@ -210,11 +220,18 @@ class RegenerateSslForService
                 ]);
             }
 
-            // Restart the service's application containers so
-            // Traefik re-reads their labels and triggers a fresh
-            // ACME challenge for the target domains.
+            // 7. Restart the service's application containers so
+            //    Traefik re-reads their labels and triggers a fresh
+            //    ACME challenge. We only restart the application
+            //    containers that actually have FQDNs — databases
+            //    (mariadb, phpMyAdmin, redis…) don't need a
+            //    restart because they don't expose HTTPS.
             $restarted = 0;
             foreach ($service->applications as $application) {
+                $fqdnRaw = (string) ($application->fqdn ?? '');
+                if ($fqdnRaw === '') {
+                    continue;
+                }
                 try {
                     $application->restart();
                     $restarted++;
@@ -226,13 +243,24 @@ class RegenerateSslForService
                 }
             }
 
+            if ($removed === 0) {
+                return [
+                    'ok' => true,
+                    'fqdns' => $fqdns,
+                    'removed' => 0,
+                    'restarted' => $restarted,
+                    'backup' => $backupPath,
+                    'message' => "Ninguna entrada de acme.json coincidió con los dominios de este servicio — puede que el certificado aún no se haya emitido. He reiniciado {$restarted} contenedor(es) para disparar un nuevo ACME challenge. Espera 30-90 segundos y recarga HTTPS.",
+                ];
+            }
+
             return [
                 'ok' => true,
                 'fqdns' => $fqdns,
                 'removed' => $removed,
                 'restarted' => $restarted,
                 'backup' => $backupPath,
-                'message' => "Podadas {$removed} entradas de acme.json para ".count($fqdns)." dominio(s), {$restarted} contenedor(es) reiniciado(s). El nuevo certificado tarda 30-90 segundos en emitirse.",
+                'message' => "Podadas {$removed} entrada(s) de acme.json para ".count($fqdns).' dominio(s), '.$restarted.' contenedor(es) reiniciado(s). El nuevo certificado tarda 30-90 segundos en emitirse.',
             ];
         } catch (\Throwable $e) {
             return [
@@ -243,6 +271,105 @@ class RegenerateSslForService
                 'backup' => $backupPath ?? null,
             ];
         }
+    }
+
+    /**
+     * Pure-PHP pruner. Takes the raw acme.json content + a list of
+     * target FQDNs and returns the rewritten JSON with matching
+     * certificates removed, or null if the input is not valid JSON.
+     *
+     * Exposed as a public method so the unit tests can feed it
+     * synthetic acme.json payloads directly without touching SSH.
+     *
+     * Traefik's acme.json v2 format:
+     *   {
+     *     "<resolverName>": {
+     *       "Account": {...},
+     *       "Certificates": [
+     *         { "domain": { "main": "foo.com", "sans": ["www.foo.com"] },
+     *           "certificate": "...", "key": "..." },
+     *         ...
+     *       ]
+     *     }
+     *   }
+     *
+     * @param  array<int, string>  $targetFqdns
+     * @return array{content: string, removed: int, kept: int}|null
+     */
+    public function pruneAcmeJson(string $raw, array $targetFqdns): ?array
+    {
+        $data = json_decode(trim($raw), true);
+        if (! is_array($data)) {
+            return null;
+        }
+
+        $targets = array_values(array_filter(
+            array_map(fn ($s) => strtolower(trim((string) $s)), $targetFqdns),
+            fn ($s) => $s !== ''
+        ));
+        if (empty($targets)) {
+            return ['content' => $raw, 'removed' => 0, 'kept' => 0];
+        }
+
+        $removed = 0;
+        $kept = 0;
+
+        foreach ($data as $resolver => $resolverData) {
+            if (! is_array($resolverData)) {
+                continue;
+            }
+            $certs = $resolverData['Certificates'] ?? null;
+            if (! is_array($certs)) {
+                continue;
+            }
+
+            $newCerts = [];
+            foreach ($certs as $cert) {
+                if (! is_array($cert)) {
+                    $newCerts[] = $cert;
+                    $kept++;
+
+                    continue;
+                }
+                $domain = $cert['domain'] ?? [];
+                $main = strtolower((string) ($domain['main'] ?? ''));
+                $sans = [];
+                if (isset($domain['sans']) && is_array($domain['sans'])) {
+                    foreach ($domain['sans'] as $san) {
+                        $sans[] = strtolower((string) $san);
+                    }
+                }
+
+                $matches = in_array($main, $targets, true);
+                if (! $matches) {
+                    foreach ($sans as $san) {
+                        if (in_array($san, $targets, true)) {
+                            $matches = true;
+                            break;
+                        }
+                    }
+                }
+
+                if ($matches) {
+                    $removed++;
+                } else {
+                    $newCerts[] = $cert;
+                    $kept++;
+                }
+            }
+            $data[$resolver]['Certificates'] = $newCerts;
+        }
+
+        $encoded = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($encoded === false) {
+            return null;
+        }
+
+        return [
+            'content' => $encoded,
+            'removed' => $removed,
+            'kept' => $kept,
+        ];
     }
 
     /**
@@ -298,145 +425,4 @@ class RegenerateSslForService
         return $host;
     }
 
-    /**
-     * Returns the embedded PHP script that prunes acme.json entries
-     * matching any of the target FQDNs. Public for testability —
-     * both the script shape and the removal logic are covered by
-     * unit tests that feed it synthetic acme.json payloads.
-     *
-     * The script accepts 2 positional arguments:
-     *   $argv[1] = path to acme.json
-     *   $argv[2] = comma-separated list of FQDNs to prune
-     *
-     * Output: single JSON line to stdout with
-     *   {ok, removed, kept, message}
-     *
-     * Traefik's acme.json structure (v2):
-     *   {
-     *     "<resolverName>": {
-     *       "Account": {...},
-     *       "Certificates": [
-     *         { "domain": { "main": "foo.com", "sans": ["www.foo.com"] },
-     *           "certificate": "...", "key": "..." },
-     *         ...
-     *       ]
-     *     }
-     *   }
-     *
-     * We remove any certificate whose domain.main OR any entry in
-     * domain.sans matches one of the target FQDNs. This is
-     * case-insensitive.
-     */
-    public function buildPrunePhpScript(): string
-    {
-        return <<<'PHP'
-<?php
-// Runs on the HOST (not inside the container) as root so it can
-// read/write the acme.json file that Traefik stores under
-// /data/coolify/proxy/acme.json (or wherever proxy_path points).
-error_reporting(E_ERROR | E_PARSE);
-
-function out($payload) { echo json_encode($payload); exit; }
-
-$acmePath = $argv[1] ?? '';
-$targetsRaw = $argv[2] ?? '';
-if ($acmePath === '' || $targetsRaw === '') {
-    out(['ok' => false, 'message' => 'Missing arguments']);
-}
-
-$targets = array_values(array_filter(
-    array_map(
-        fn ($s) => strtolower(trim((string) $s)),
-        explode(',', $targetsRaw)
-    ),
-    fn ($s) => $s !== ''
-));
-if (empty($targets)) {
-    out(['ok' => false, 'message' => 'No target FQDNs provided']);
-}
-
-$raw = @file_get_contents($acmePath);
-if ($raw === false) {
-    out(['ok' => false, 'message' => 'Could not read ' . $acmePath]);
-}
-
-// acme.json is usually JSON, but Traefik writes it with trailing
-// whitespace / newlines. json_decode handles that fine, but we
-// still trim to be safe.
-$data = json_decode(trim($raw), true);
-if (! is_array($data)) {
-    out(['ok' => false, 'message' => 'acme.json is not valid JSON']);
-}
-
-$removed = 0;
-$kept = 0;
-
-foreach ($data as $resolver => $resolverData) {
-    if (! is_array($resolverData)) continue;
-    $certs = $resolverData['Certificates'] ?? null;
-    if (! is_array($certs)) continue;
-
-    $newCerts = [];
-    foreach ($certs as $cert) {
-        if (! is_array($cert)) { $newCerts[] = $cert; $kept++; continue; }
-        $domain = $cert['domain'] ?? [];
-        $main = strtolower((string) ($domain['main'] ?? ''));
-        $sans = array_map(
-            fn ($s) => strtolower((string) $s),
-            is_array($domain['sans'] ?? null) ? $domain['sans'] : []
-        );
-        $matches = in_array($main, $targets, true);
-        if (! $matches) {
-            foreach ($sans as $san) {
-                if (in_array($san, $targets, true)) { $matches = true; break; }
-            }
-        }
-        if ($matches) {
-            $removed++;
-        } else {
-            $newCerts[] = $cert;
-            $kept++;
-        }
-    }
-    $data[$resolver]['Certificates'] = $newCerts;
-}
-
-if ($removed === 0) {
-    out([
-        'ok' => true,
-        'removed' => 0,
-        'kept' => $kept,
-        'message' => 'No matching certificates found in acme.json — nothing to prune. Certificates may be pending issuance; restarting containers will retry the ACME challenge.',
-    ]);
-}
-
-// Write the pruned JSON back. Keep the format Traefik uses:
-// pretty-printed with 2-space indent (Traefik writes it with
-// JSON_PRETTY_PRINT by default).
-$encoded = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-if ($encoded === false) {
-    out(['ok' => false, 'message' => 'Could not re-encode acme.json: ' . json_last_error_msg()]);
-}
-
-// Atomic write: write to .tmp first, then rename. This prevents
-// Traefik from reading a half-written file if it polls during the
-// write. acme.json must be mode 0600 per Traefik's requirement.
-$tmpPath = $acmePath . '.coolify-tmp';
-if (@file_put_contents($tmpPath, $encoded) === false) {
-    out(['ok' => false, 'message' => 'Could not write ' . $tmpPath]);
-}
-@chmod($tmpPath, 0600);
-if (! @rename($tmpPath, $acmePath)) {
-    @unlink($tmpPath);
-    out(['ok' => false, 'message' => 'Could not rename ' . $tmpPath . ' to ' . $acmePath]);
-}
-
-out([
-    'ok' => true,
-    'removed' => $removed,
-    'kept' => $kept,
-    'message' => "Pruned {$removed} certificate(s), kept {$kept}",
-]);
-PHP;
-    }
 }

@@ -980,10 +980,16 @@ $oldTables = [];
 while ($row = $res->fetch_array(MYSQLI_NUM)) { $oldTables[] = $row[0]; }
 $res->free();
 
-// If no old-prefix tables, verify the new-prefix tables exist
-// already. That is the "user just wants to sync wp-config.php with
-// tables someone already renamed" case.
+// If the prefix we read from wp-config.php does not match any
+// table in the database, the state is inconsistent — either a
+// previous rename got stuck half-way, or someone renamed tables
+// manually without updating wp-config.php. Instead of giving up,
+// auto-detect the REAL prefix by looking for the canonical WordPress
+// core table names (`posts`, `users`, `options`). Whichever prefix
+// those tables share is the truth.
 if (empty($oldTables)) {
+    // First check: do the tables already match the NEW prefix
+    // (idempotent no-op case)?
     $likeNew = str_replace('_', '\\_', $newPrefix) . '%';
     $res = $mysqli->query("SHOW TABLES LIKE '" . $mysqli->real_escape_string($likeNew) . "'");
     $newExists = $res && $res->num_rows > 0;
@@ -997,7 +1003,70 @@ if (empty($oldTables)) {
             'message' => 'Tables already use the new prefix — only wp-config.php needed updating.',
         ]);
     }
-    out(['ok' => false, 'message' => "No tables with prefix '$oldPrefix' or '$newPrefix' found."]);
+
+    // Auto-detect: scan all tables and find one that looks like a
+    // WordPress core table (ends in _posts / _users / _options).
+    // Every WordPress install has these three, so the prefix is
+    // just "table_name minus the suffix".
+    $detected = null;
+    $allRes = $mysqli->query("SHOW TABLES");
+    if ($allRes) {
+        $allTables = [];
+        while ($row = $allRes->fetch_array(MYSQLI_NUM)) { $allTables[] = $row[0]; }
+        $allRes->free();
+
+        // Look for tables ending in `_posts`, `_users`, `_options` —
+        // in that priority order because `_posts` is the most
+        // distinctive (less likely to appear in a non-WP database
+        // that shares the schema).
+        $coreSuffixes = ['_posts', '_users', '_options', '_postmeta', '_usermeta'];
+        foreach ($coreSuffixes as $suffix) {
+            foreach ($allTables as $t) {
+                // Case-insensitive tail match on the core suffix.
+                if (strlen($t) > strlen($suffix)
+                    && strtolower(substr($t, -strlen($suffix))) === $suffix) {
+                    $candidate = substr($t, 0, -strlen($suffix) + 1); // keep trailing _
+                    if ($candidate !== '' && preg_match('/^[a-zA-Z0-9_]+$/', $candidate)) {
+                        $detected = $candidate;
+                        break 2;
+                    }
+                }
+            }
+        }
+    }
+
+    if ($detected === null) {
+        out([
+            'ok' => false,
+            'message' => "No tables with prefix '$oldPrefix' or '$newPrefix' found, and no WordPress core tables (*_posts / *_users / *_options) detected. Is this the right database? Check DB_NAME in wp-config.php.",
+        ]);
+    }
+
+    if ($detected === $newPrefix) {
+        out([
+            'ok' => true,
+            'renamed' => 0,
+            'meta_updated' => 0,
+            'options_updated' => 0,
+            'message' => "Tables already use the prefix '$newPrefix' (detected via core table scan) — only wp-config.php needed updating.",
+        ]);
+    }
+
+    // Override: use the auto-detected prefix as the actual old
+    // prefix. wp-config.php may say something else, but the
+    // database is the source of truth here.
+    $oldPrefix = $detected;
+    $likeOld = str_replace('_', '\\_', $oldPrefix) . '%';
+    $res = $mysqli->query("SHOW TABLES LIKE '" . $mysqli->real_escape_string($likeOld) . "'");
+    if (!$res) {
+        out(['ok' => false, 'message' => 'SHOW TABLES retry failed: ' . $mysqli->error]);
+    }
+    while ($row = $res->fetch_array(MYSQLI_NUM)) { $oldTables[] = $row[0]; }
+    $res->free();
+
+    if (empty($oldTables)) {
+        out(['ok' => false, 'message' => "Auto-detected prefix '$detected' but SHOW TABLES returned empty on retry — something weird is going on."]);
+    }
 }
 
 // Build a single atomic RENAME TABLE.
