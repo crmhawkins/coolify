@@ -54,8 +54,20 @@ class Terminal extends Component
 
             // Escape the identifier for shell usage
             $escapedIdentifier = escapeshellarg($identifier);
+            // Shell bootstrap: normalise PATH, source ~/.profile, cd into
+            // the first well-known web-app workdir that exists (Laravel,
+            // WordPress, Node images all land in /var/www/html or similar),
+            // then exec the user's login shell. Database-only containers
+            // have none of these paths and harmlessly fall through.
+            //
+            // The `;` after `done` is deliberate: if no path exists the
+            // for-loop's last iteration exits non-zero, so chaining with
+            // `&&` would skip the exec. `;` always runs the exec.
             $shellCommand = 'PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin && '.
                             'if [ -f ~/.profile ]; then . ~/.profile; fi && '.
+                            'for d in /var/www/html /var/www /app /code /srv/app /usr/share/nginx/html; do '.
+                            '[ -d "$d" ] && cd "$d" && break; '.
+                            'done; '.
                             'if [ -n "$SHELL" ] && [ -x "$SHELL" ]; then exec $SHELL; else sh; fi';
 
             // Add sudo for non-root users to access Docker socket
