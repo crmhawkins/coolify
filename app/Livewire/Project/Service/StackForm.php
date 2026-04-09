@@ -399,11 +399,27 @@ class StackForm extends Component
             ." && TARGET_HEAD=\"\$(git rev-parse {$branchRef} 2>/dev/null || true)\""
             ." && if [ -z \"\$TARGET_HEAD\" ]; then echo 'ERROR: Unable to resolve target commit from remote branch.'; exit 1; fi"
             ." && if [ -n \"\$CURRENT_HEAD\" ] && [ \"\$CURRENT_HEAD\" = \"\$TARGET_HEAD\" ]; then echo 'No new commits to deploy.'; else echo 'New commits deployed:'; if [ -n \"\$CURRENT_HEAD\" ]; then git log --reverse --format='%h %s (%an)' \"\$CURRENT_HEAD..\$TARGET_HEAD\"; else git log --reverse --format='%h %s (%an)' -n 10 \"\$TARGET_HEAD\"; fi; fi"
-            ." && if ! git checkout -B ".escapeshellarg($branch)." {$branchRef}; then echo 'ERROR: git checkout failed'; exit 1; fi"
+            // -f forces checkout over dirty files (storage/framework, cache
+            // symlinks, etc.) that the container normally writes at runtime.
+            // Without it, `git checkout -B` aborts with "local changes would
+            // be overwritten" on any second deploy.
+            ." && if ! git checkout -f -B ".escapeshellarg($branch)." {$branchRef}; then echo 'ERROR: git checkout failed'; exit 1; fi"
             ." && if [ -f composer.json ]; then if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then echo 'ERROR: composer install failed'; echo 'Failed at: composer install'; sed -n '1,220p' /tmp/coolify-composer-install.log; exit 1; fi; fi"
             ." && if [ -f package.json ]; then if [ -f package-lock.json ]; then NPM_INSTALL_CMD='npm ci --no-audit --no-fund'; else NPM_INSTALL_CMD='npm install --no-audit --no-fund'; fi; if ! sh -lc \"\$NPM_INSTALL_CMD && npm run build\" >/tmp/coolify-npm-build.log 2>&1; then echo 'ERROR: frontend build failed'; echo 'Failed at: npm install/build'; sed -n '1,220p' /tmp/coolify-npm-build.log; exit 1; fi; fi"
             ." && if [ -f .env ]; then if grep -Eq '^ASSET_URL=' .env; then sed -i 's|^ASSET_URL=.*|ASSET_URL=|' .env; else echo 'ASSET_URL=' >> .env; fi; fi"
-            ." && if [ -f artisan ]; then php artisan optimize:clear >/tmp/coolify-artisan-clear.log 2>&1 || true; fi"
+            // Clear first (so new code is picked up), then re-cache config/
+            // routes/views so the first request after deploy doesn't pay the
+            // cold-boot penalty. Every stage is `|| true`: cache warming is
+            // best-effort and a failing view:cache shouldn't kill a
+            // successful code deploy.
+            ." && if [ -f artisan ]; then "
+            ."php artisan optimize:clear >/tmp/coolify-artisan-clear.log 2>&1 || true; "
+            ."php artisan config:cache >/tmp/coolify-artisan-config-cache.log 2>&1 || true; "
+            ."php artisan route:cache >/tmp/coolify-artisan-route-cache.log 2>&1 || true; "
+            ."php artisan view:cache >/tmp/coolify-artisan-view-cache.log 2>&1 || true; "
+            ."php artisan event:cache >/tmp/coolify-artisan-event-cache.log 2>&1 || true; "
+            ."php artisan queue:restart >/tmp/coolify-artisan-queue-restart.log 2>&1 || true; "
+            ."fi"
             ." && echo \"Deploy completed successfully at commit \$(git rev-parse --short HEAD)\"";
 
         $this->runFrontendAssetCommand($command);
@@ -595,12 +611,36 @@ class StackForm extends Component
 
             $server = $context['server'];
             $escapedContainer = $context['escapedContainer'];
-            $command = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($shellCommand);
+
+            // Wrap the shell command so the SSH call always exits 0.
+            // Rationale: the inner scripts intentionally call `exit 1` on
+            // composer/npm/git failures to short-circuit further steps.
+            // If we let that propagate, excludeCertainErrors() throws a
+            // RuntimeException with "SSH command failed with exit code: 1"
+            // and the real stdout (the actual composer/git error message)
+            // is discarded. By trapping the exit code inside the wrapper
+            // we keep stdout intact and surface failure via a sentinel
+            // marker the PHP side looks for.
+            $wrappedCommand = '('.$shellCommand.'); __cc_status=$?; '
+                .'if [ "$__cc_status" != "0" ]; then echo "__COOLIFY_ASSET_FAILED__$__cc_status"; fi; '
+                .'exit 0';
+
+            $command = "docker exec {$escapedContainer} sh -lc ".escapeshellarg($wrappedCommand);
             if ($server->isNonRoot()) {
                 $command = "sudo {$command}";
             }
 
-            $this->assetActionOutput = (string) (instant_remote_process([$command], $server, false) ?? '');
+            $output = (string) (instant_remote_process([$command], $server, false) ?? '');
+
+            if (preg_match('/__COOLIFY_ASSET_FAILED__(\d+)/', $output, $matches)) {
+                $exitCode = $matches[1];
+                $this->assetActionOutput = trim((string) preg_replace('/\s*__COOLIFY_ASSET_FAILED__\d+\s*/', '', $output));
+                $this->dispatch('error', "Asset command failed (exit {$exitCode}). See output panel for details.");
+
+                return;
+            }
+
+            $this->assetActionOutput = $output;
             $this->dispatch('success', 'Asset command executed.');
         } catch (\Throwable $e) {
             $this->assetActionOutput = $e->getMessage();
@@ -612,14 +652,15 @@ class StackForm extends Component
 
     private function getLaravelContainerContext(): ?array
     {
+        // Strictly require a container whose name contains "laravel". The
+        // Deploy/Migrate/Clear actions all shell out to php, composer,
+        // artisan and npm, which only exist in the Laravel PHP-FPM
+        // container of the RootKit stack. The previous fallback to "any
+        // running container" could silently return nginx, mariadb or
+        // phpmyadmin and produce cryptic "command not found" errors.
         $application = $this->service->applications
             ->first(fn ($app) => str($app->name)->lower()->contains('laravel')
                 && str($app->status)->contains('running'));
-
-        if (! $application) {
-            $application = $this->service->applications
-                ->first(fn ($app) => str($app->status)->contains('running'));
-        }
 
         if (! $application) {
             return null;

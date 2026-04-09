@@ -120,11 +120,15 @@ class Index extends Component
 
     /**
      * Turns a raw container name into a human-readable label of the
-     * form "ProjectName → role". The role is the container name prefix
-     * (everything before the last dash) and the project comes from the
-     * resource lookup keyed by the UUID suffix. If the suffix does not
-     * match any known Service or Application we fall back to the raw
-     * container name so Coolify's own system containers (coolify-db,
+     * form "Project → Resource → role". The role is the container name
+     * prefix (everything before the last dash) and the project/resource
+     * come from the lookup keyed by the UUID suffix. Including the
+     * resource name disambiguates projects that host more than one
+     * service (e.g. a project "I-pointsite" with both a CRM and a
+     * storefront laravel stack would otherwise appear as two identical
+     * "I-pointsite → laravel" rows in the selector). If the suffix does
+     * not match any known Service or Application we fall back to the
+     * raw container name so Coolify's own system containers (coolify-db,
      * coolify-proxy, …) still render something meaningful.
      *
      * @param  array<string, array{project: string, resource: string}>  $resourceLookup
@@ -152,13 +156,26 @@ class Index extends Component
         }
 
         $entry = $resourceLookup[$suffix];
-        $projectName = $entry['project'] !== '' ? $entry['project'] : $entry['resource'];
+        $projectName = (string) $entry['project'];
+        $resourceName = (string) $entry['resource'];
 
-        if ($projectName === '') {
+        // Collapse project==resource to a single segment to avoid noise
+        // like "CRM → CRM → laravel" when the team only has one service
+        // per project and named it the same as the project itself.
+        $parts = [];
+        if ($projectName !== '') {
+            $parts[] = $projectName;
+        }
+        if ($resourceName !== '' && $resourceName !== $projectName) {
+            $parts[] = $resourceName;
+        }
+        $parts[] = $role;
+
+        if (count($parts) < 2) {
             return $containerName;
         }
 
-        return $projectName.' → '.$role;
+        return implode(' → ', $parts);
     }
 
     public function updatedSelectedUuid()

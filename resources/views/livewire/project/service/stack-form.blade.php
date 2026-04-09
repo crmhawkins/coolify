@@ -17,35 +17,64 @@
                         wire:click="deployLaravelChanges"
                         wire:loading.attr="disabled"
                         wire:target="deployLaravelChanges"
+                        wire:confirm="Deploy cambios hará fetch + checkout forzado sobre el contenedor laravel, ejecutará composer install y npm run build, y limpiará las cachés. ¿Continuar?"
+                        title="Pull desde el repo, composer install, npm build y clear cache"
                     >
-                        Deploy cambios
+                        <span wire:loading.remove wire:target="deployLaravelChanges">Deploy cambios</span>
+                        <span wire:loading wire:target="deployLaravelChanges">Desplegando…</span>
                     </x-forms.button>
                     <x-forms.button
                         type="button"
                         wire:click="runLaravelMigrations"
                         wire:loading.attr="disabled"
                         wire:target="runLaravelMigrations"
+                        wire:confirm="Se ejecutará php artisan migrate --force contra la base de datos en producción. ¿Continuar?"
+                        title="php artisan migrate --force"
                     >
-                        Run migrations
+                        <span wire:loading.remove wire:target="runLaravelMigrations">Run migrations</span>
+                        <span wire:loading wire:target="runLaravelMigrations">Migrando…</span>
                     </x-forms.button>
                     <x-forms.button
                         type="button"
                         wire:click="runLaravelMaintenanceCommand('clear-all')"
                         wire:loading.attr="disabled"
                         wire:target="runLaravelMaintenanceCommand('clear-all')"
+                        title="optimize:clear + config + route + view + cache + event + queue:restart"
                     >
-                        Clear Cache All
+                        <span wire:loading.remove wire:target="runLaravelMaintenanceCommand('clear-all')">Clear Cache All</span>
+                        <span wire:loading wire:target="runLaravelMaintenanceCommand('clear-all')">Limpiando…</span>
                     </x-forms.button>
                 @endif
             @endcan
         </div>
         <div>Configuration</div>
     </div>
-    @if ($this->isLaravelRootkitStack() && $assetActionOutput !== '')
-        <div class="rounded border border-coolgray-300 dark:border-coolgray-700 p-3">
-            <div class="mb-2 text-sm font-semibold">Asset Command Output</div>
-            <pre class="whitespace-pre-wrap break-words text-xs">{{ $assetActionOutput }}</pre>
+    @if ($this->isLaravelRootkitStack())
+        <div
+            wire:loading.flex
+            wire:target="deployLaravelChanges,runLaravelMigrations,runLaravelMaintenanceCommand"
+            class="hidden items-center gap-2 rounded border border-coolgray-300 dark:border-coolgray-700 p-3 text-sm"
+        >
+            <x-loading />
+            <span>Ejecutando comando en el contenedor laravel… esto puede tardar varios minutos en el primer deploy.</span>
         </div>
+        @if ($assetActionOutput !== '')
+            <div
+                wire:loading.remove
+                wire:target="deployLaravelChanges,runLaravelMigrations,runLaravelMaintenanceCommand"
+                class="rounded border border-coolgray-300 dark:border-coolgray-700 p-3"
+            >
+                <div class="mb-2 flex items-center justify-between gap-2">
+                    <div class="text-sm font-semibold">Asset Command Output</div>
+                    <button
+                        type="button"
+                        class="text-xs text-coolgray-500 hover:text-coolgray-700 dark:hover:text-coolgray-300"
+                        wire:click="$set('assetActionOutput', '')"
+                    >Cerrar</button>
+                </div>
+                <pre class="max-h-[480px] overflow-auto whitespace-pre-wrap break-words text-xs">{{ $assetActionOutput }}</pre>
+            </div>
+        @endif
     @endif
     <div class="flex gap-2">
         <x-forms.input canGate="update" :canResource="$service" id="name" required label="Service Name"
