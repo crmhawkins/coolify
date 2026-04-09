@@ -81,27 +81,58 @@
                              the background without hammering the cache
                              endpoint. --}}
                         @if (! auth()->user()->isClient())
+                        {{-- EVERY sizing attribute here is inline (width=,
+                             height=, style="width:...") instead of Tailwind
+                             classes. This is deliberate: the Coolify server
+                             may not have rebuilt the Tailwind bundle after
+                             the deploy, and any class Tailwind hasn't seen
+                             before (w-3.5, w-[30rem], etc.) will simply
+                             not exist in the CSS, leaving the SVG to
+                             auto-scale to the full absolute container
+                             width — that's the ~120px gigante icon you
+                             saw in production. Inline width/height on
+                             <svg> itself is the native spec default and
+                             works regardless of CSS.
+
+                             The <style> block defines the `spin` and
+                             `pulse` keyframes under a scoped class name
+                             (ct-*) so we don't clash with Tailwind's own
+                             animations even if both exist. Everything
+                             else is inline style or native attributes. --}}
+                        <style>
+                            @keyframes ct-spin {
+                                to { transform: rotate(360deg); }
+                            }
+                            @keyframes ct-pulse {
+                                0%, 100% { opacity: 1; }
+                                50% { opacity: 0.55; }
+                            }
+                        </style>
                         <div
-                            class="absolute right-0 top-0 z-40"
+                            class="z-40"
+                            style="position:absolute;right:0;top:0;"
                             x-data="compressionTasksPanel()"
                             x-init="init()"
                             @keydown.window.escape="open = false"
                         >
-                            <div class="relative" @click.outside="open = false">
+                            <div style="position:relative;" @click.outside="open = false">
                                 <button
                                     type="button"
                                     @click="open = !open; if (open) { refresh(); }"
-                                    :class="buttonClasses()"
+                                    :style="buttonStyle()"
                                     :title="buttonTitle()"
-                                    class="flex items-center gap-2 rounded px-3 py-1.5 text-xs font-semibold shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-coollabs"
+                                    class="rounded text-xs font-semibold shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-offset-1"
                                 >
-                                    {{-- Archive icon --}}
-                                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                    {{-- Archive icon — sized with native
+                                         SVG width/height AND inline style
+                                         so it renders at 14×14 regardless
+                                         of Tailwind state. --}}
+                                    <svg width="14" height="14" style="width:14px;height:14px;flex-shrink:0;display:block;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M21 8v13H3V8M1 3h22v5H1zM10 12h4" />
                                     </svg>
                                     <span x-text="buttonLabel()"></span>
-                                    {{-- Running spinner --}}
-                                    <svg x-show="runningCount > 0" x-cloak class="w-3.5 h-3.5 shrink-0 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    {{-- Running spinner — same inline sizing. --}}
+                                    <svg x-show="runningCount > 0" x-cloak width="14" height="14" style="width:14px;height:14px;flex-shrink:0;display:block;animation:ct-spin 1s linear infinite;" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
                                     </svg>
@@ -116,8 +147,8 @@
                                     x-transition:leave="transition ease-in duration-100"
                                     x-transition:leave-start="opacity-100 scale-100 translate-y-0"
                                     x-transition:leave-end="opacity-0 scale-95 -translate-y-1"
-                                    class="absolute right-0 mt-2 w-[30rem] max-h-[32rem] overflow-auto rounded-lg border shadow-2xl"
-                                    style="background-color:#18181b;border-color:#27272a;color:#e4e4e7;"
+                                    class="rounded-lg border shadow-2xl"
+                                    style="position:absolute;right:0;top:calc(100% + 0.5rem);width:30rem;max-width:calc(100vw - 2rem);max-height:32rem;overflow:auto;background-color:#18181b;border-color:#27272a;color:#e4e4e7;"
                                 >
                                     {{-- Header --}}
                                     <div class="flex items-center justify-between gap-2 border-b px-4 py-3" style="border-color:#27272a;">
@@ -141,7 +172,7 @@
                                                 onmouseout="this.style.backgroundColor='#27272a'"
                                                 title="Actualizar ahora"
                                             >
-                                                <svg class="w-3 h-3 inline" :class="loading ? 'animate-spin' : ''" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                                <svg width="12" height="12" :style="'width:12px;height:12px;display:inline-block;' + (loading ? 'animation:ct-spin 1s linear infinite;' : '')" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M5.07 19A9 9 0 0021 12.08M19 5a9 9 0 00-14 2" />
                                                 </svg>
                                             </button>
@@ -165,7 +196,7 @@
                                     {{-- Empty state --}}
                                     <template x-if="tasks.length === 0 && !loading">
                                         <div class="flex flex-col items-center justify-center px-4 py-10 text-center">
-                                            <svg class="w-10 h-10 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="color:#3f3f46;">
+                                            <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="width:40px;height:40px;margin-bottom:0.5rem;color:#3f3f46;display:block;">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M21 8v13H3V8M1 3h22v5H1zM10 12h4" />
                                             </svg>
                                             <p class="text-sm" style="color:#a1a1aa;">No hay tareas de compresión</p>
@@ -180,28 +211,29 @@
                                         </div>
                                     </template>
 
-                                    {{-- Task list --}}
+                                    {{-- Task list. Inline styles only so nothing
+                                         depends on Tailwind utility classes that
+                                         may be missing from the compiled bundle. --}}
                                     <template x-if="tasks.length > 0">
-                                        <ul class="divide-y" style="border-color:#27272a;">
+                                        <ul style="list-style:none;margin:0;padding:0;">
                                             <template x-for="task in tasks" :key="task.id || task.archive_path">
-                                                <li class="px-4 py-3 transition-colors" :class="taskRowClass(task)">
-                                                    <div class="flex items-start justify-between gap-2">
-                                                        <div class="min-w-0 flex-1">
-                                                            <div class="flex items-center gap-2">
-                                                                <span class="shrink-0" x-html="taskIcon(task)"></span>
-                                                                <p class="truncate text-sm font-semibold" style="color:#ffffff;" x-text="task.archive_name || 'archive.zip'"></p>
+                                                <li :style="taskRowStyle(task)">
+                                                    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.5rem;">
+                                                        <div style="min-width:0;flex:1 1 0%;">
+                                                            <div style="display:flex;align-items:center;gap:0.5rem;">
+                                                                <span style="flex-shrink:0;display:inline-flex;" x-html="taskIcon(task)"></span>
+                                                                <p style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.875rem;font-weight:600;color:#ffffff;" x-text="task.archive_name || 'archive.zip'"></p>
                                                             </div>
-                                                            <p class="mt-1 truncate text-[11px] font-mono" style="color:#71717a;" x-text="'📁 ' + (task.directory || '/')"></p>
-                                                            <p x-show="task.last_message" x-cloak class="mt-1 break-words text-[11px]" :class="task.status === 'failed' ? 'text-red-400' : ''" style="color:#a1a1aa;" x-text="task.last_message"></p>
-                                                            <p x-show="task.created_at" x-cloak class="mt-1 text-[10px]" style="color:#52525b;" x-text="relativeTime(task.created_at)"></p>
+                                                            <p style="margin:0.25rem 0 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.6875rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#71717a;" x-text="'📁 ' + (task.directory || '/')"></p>
+                                                            <p x-show="task.last_message" x-cloak style="margin:0.25rem 0 0 0;word-break:break-word;font-size:0.6875rem;" :style="'margin:0.25rem 0 0 0;word-break:break-word;font-size:0.6875rem;color:' + (task.status === 'failed' ? '#f87171' : '#a1a1aa') + ';'" x-text="task.last_message"></p>
+                                                            <p x-show="task.created_at" x-cloak style="margin:0.25rem 0 0 0;font-size:0.625rem;color:#52525b;" x-text="relativeTime(task.created_at)"></p>
                                                         </div>
-                                                        <span :class="statusPillClass(task)" class="shrink-0 rounded px-2 py-0.5 text-[10px] font-mono font-bold uppercase" x-text="task.status || 'running'"></span>
+                                                        <span :style="statusPillStyle(task)" x-text="(task.status || 'running').toUpperCase()"></span>
                                                     </div>
-                                                    <div class="mt-2 flex items-center gap-2" x-show="task.open_url" x-cloak>
+                                                    <div style="margin-top:0.5rem;display:flex;align-items:center;gap:0.5rem;" x-show="task.open_url" x-cloak>
                                                         <a
                                                             :href="task.open_url"
-                                                            class="rounded px-2 py-1 text-[11px] font-semibold transition-colors"
-                                                            style="background-color:#8b5cf6;color:#ffffff;"
+                                                            style="display:inline-block;border-radius:0.25rem;padding:0.25rem 0.5rem;font-size:0.6875rem;font-weight:600;background-color:#8b5cf6;color:#ffffff;text-decoration:none;"
                                                             onmouseover="this.style.backgroundColor='#7c3aed'"
                                                             onmouseout="this.style.backgroundColor='#8b5cf6'"
                                                         >
@@ -313,43 +345,63 @@
                                         if (this.completedCount > 0) return `${this.completedCount} completadas. Haz clic para gestionarlas.`;
                                         return 'Tareas de compresión en segundo plano';
                                     },
-                                    // Color classes for the trigger button. Empty
-                                    // state = ghost gray so it doesn't bleed into
-                                    // every page; running = amber with a subtle
-                                    // pulse; failed = red; all done = green.
-                                    buttonClasses() {
+                                    // Inline style for the trigger button. We
+                                    // deliberately avoid Tailwind utility
+                                    // classes here because arbitrary/custom
+                                    // color classes may be missing from the
+                                    // compiled bundle on the server (that's
+                                    // what blew up the button size and
+                                    // styling in production). Everything the
+                                    // button needs — colors, layout, padding,
+                                    // font, animation — is hard-coded in
+                                    // this style string so nothing depends
+                                    // on Tailwind state.
+                                    buttonStyle() {
+                                        const common = 'display:inline-flex;align-items:center;gap:0.5rem;padding:0.375rem 0.75rem;line-height:1;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid transparent;cursor:pointer;';
                                         if (this.tasks.length === 0) {
-                                            return 'bg-coolgray-200 text-coolgray-500 border border-coolgray-300 dark:bg-coolgray-200 dark:text-coolgray-500 dark:border-coolgray-400 opacity-60 hover:opacity-100';
+                                            // Ghost gray so it doesn't bleed into every page.
+                                            return common + 'background-color:#27272a;color:#71717a;border-color:#3f3f46;opacity:0.65;';
                                         }
                                         if (this.failedCount > 0) {
-                                            return 'bg-red-600 text-white hover:bg-red-700';
+                                            return common + 'background-color:#dc2626;color:#ffffff;border-color:#b91c1c;';
                                         }
                                         if (this.runningCount > 0) {
-                                            return 'bg-amber-500 text-white hover:bg-amber-600 animate-pulse';
+                                            return common + 'background-color:#f59e0b;color:#ffffff;border-color:#d97706;animation:ct-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;';
                                         }
-                                        return 'bg-green-600 text-white hover:bg-green-700';
+                                        return common + 'background-color:#16a34a;color:#ffffff;border-color:#15803d;';
                                     },
-                                    taskRowClass(task) {
+                                    taskRowStyle(task) {
+                                        const common = 'padding:0.75rem 1rem;border-bottom:1px solid #27272a;';
                                         const s = task?.status || 'running';
-                                        if (s === 'failed') return 'border-l-2 border-red-500';
-                                        if (s === 'completed') return 'border-l-2 border-green-500';
-                                        return 'border-l-2 border-amber-500';
+                                        if (s === 'failed') return common + 'border-left:3px solid #ef4444;';
+                                        if (s === 'completed') return common + 'border-left:3px solid #22c55e;';
+                                        return common + 'border-left:3px solid #f59e0b;';
                                     },
-                                    statusPillClass(task) {
+                                    statusPillStyle(task) {
+                                        const common = 'flex-shrink:0;display:inline-block;border-radius:0.25rem;padding:0.125rem 0.5rem;font-size:0.625rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;text-transform:uppercase;border-width:1px;border-style:solid;';
                                         const s = task?.status || 'running';
-                                        if (s === 'failed') return 'bg-red-500/15 text-red-400 border border-red-500/30';
-                                        if (s === 'completed') return 'bg-green-500/15 text-green-400 border border-green-500/30';
-                                        return 'bg-amber-500/15 text-amber-400 border border-amber-500/30';
+                                        if (s === 'failed') return common + 'background-color:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3);';
+                                        if (s === 'completed') return common + 'background-color:rgba(34,197,94,0.15);color:#4ade80;border-color:rgba(34,197,94,0.3);';
+                                        return common + 'background-color:rgba(245,158,11,0.15);color:#fbbf24;border-color:rgba(245,158,11,0.3);';
                                     },
                                     taskIcon(task) {
+                                        // Inline width/height + style because the
+                                        // Tailwind classes w-3.5 / h-3.5 may not
+                                        // exist in the compiled bundle on the
+                                        // server. Without a size, SVGs balloon to
+                                        // the container width (the gigante icon
+                                        // bug from production). Colors come from
+                                        // `color:` inline style so they also
+                                        // survive an uncompiled Tailwind.
                                         const s = task?.status || 'running';
+                                        const sz = 'width="14" height="14" style="width:14px;height:14px;display:inline-block;flex-shrink:0';
                                         if (s === 'failed') {
-                                            return '<svg class="w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M12 3a9 9 0 100 18 9 9 0 000-18z"/></svg>';
+                                            return `<svg ${sz};color:#f87171;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M12 3a9 9 0 100 18 9 9 0 000-18z"/></svg>`;
                                         }
                                         if (s === 'completed') {
-                                            return '<svg class="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>';
+                                            return `<svg ${sz};color:#4ade80;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`;
                                         }
-                                        return '<svg class="w-3.5 h-3.5 text-amber-400 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>';
+                                        return `<svg ${sz};color:#fbbf24;animation:ct-spin 1s linear infinite;" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>`;
                                     },
                                     // Human-readable relative time. Accepts ISO
                                     // strings or "YYYY-MM-DD HH:MM:SS" formats —
