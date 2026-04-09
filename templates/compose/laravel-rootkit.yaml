@@ -663,6 +663,242 @@ services:
           # END pre-flight PHP version check
           # ============================================================
 
+          # ============================================================
+          # PRE-FLIGHT PHP extensions check
+          # ============================================================
+          # Reads composer.json (+ composer.lock) and extracts every
+          # "ext-*" requirement. For each extension that is not already
+          # loaded in the container, attempts to install it via a small
+          # hardcoded map (apk + docker-php-ext-install / pecl).
+          #
+          # Why: Laravel projects routinely declare extensions (ext-
+          # imagick for thumbnail generation, ext-ldap for AD sync,
+          # ext-memcached for cache, etc.) that are NOT in this
+          # template's default REQUIRED_EXTS list. Without this block
+          # composer install would fail with a long platform-check
+          # error that means nothing to a non-dev deploying for a
+          # client. With it, the extension is either auto-installed
+          # silently or the user gets a Spanish error page naming the
+          # exact extension and what to do about it.
+          #
+          # Design:
+          # - Common extensions have a pre-registered install recipe.
+          # - Unknown extensions fall through to a generic attempt
+          #   (docker-php-ext-install → pecl) so projects with exotic
+          #   requires don't block on a missing map entry.
+          # - Failures are collected and, if non-empty, written to
+          #   the same error-page shell as the PHP version preflight.
+          rm -f /tmp/coolify-ext-requested.txt 2>/dev/null || true
+
+          # Extract ext-* keys from composer.json via a PHP one-liner
+          # (no composer needed). Merges require + require-dev so we
+          # also pick up ext-xdebug and friends that may be dev-only
+          # but are still needed for the project to boot.
+          cd /var/www/html
+          REQUESTED_EXTS="$(php -r '
+          $j = @json_decode(@file_get_contents("composer.json"), true);
+          if (!is_array($j)) { exit(0); }
+          $req = array_merge((array) ($j["require"] ?? []), (array) ($j["require-dev"] ?? []));
+          $exts = [];
+          foreach (array_keys($req) as $k) {
+              if (is_string($k) && strpos($k, "ext-") === 0) {
+                  $name = substr($k, 4);
+                  if ($name !== "") { $exts[] = $name; }
+              }
+          }
+          echo implode(" ", $exts);
+          ' 2>/dev/null || true)"
+
+          UNRESOLVABLE_EXTS=""
+          INSTALLED_EXTS=""
+
+          if [ -n "$REQUESTED_EXTS" ]; then
+            echo "Pre-flight extensions check: project declares [$REQUESTED_EXTS]"
+            for ext in $REQUESTED_EXTS; do
+              # Skip if already loaded (covers core extensions like
+              # json, tokenizer, openssl, and anything apk already
+              # installed in the REQUIRED_EXTS bootstrap block).
+              if php -r "exit(extension_loaded('$ext') ? 0 : 1);" 2>/dev/null; then
+                continue
+              fi
+
+              echo "  → Installing ext-$ext ..."
+              EXT_INSTALL_OK=0
+              set +e
+              case "$ext" in
+                imagick)
+                  apk add --no-cache imagemagick imagemagick-dev libtool >/dev/null 2>&1
+                  pecl install imagick >/dev/null 2>&1 && docker-php-ext-enable imagick >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                memcached)
+                  apk add --no-cache libmemcached-dev zlib-dev cyrus-sasl-dev >/dev/null 2>&1
+                  pecl install memcached >/dev/null 2>&1 && docker-php-ext-enable memcached >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                mongodb)
+                  apk add --no-cache openssl-dev >/dev/null 2>&1
+                  pecl install mongodb >/dev/null 2>&1 && docker-php-ext-enable mongodb >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                xdebug)
+                  pecl install xdebug >/dev/null 2>&1 && docker-php-ext-enable xdebug >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                ldap)
+                  apk add --no-cache openldap-dev >/dev/null 2>&1
+                  docker-php-ext-install -j"$(nproc)" ldap >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                apcu)
+                  pecl install apcu >/dev/null 2>&1 && docker-php-ext-enable apcu >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                amqp)
+                  apk add --no-cache rabbitmq-c-dev >/dev/null 2>&1
+                  pecl install amqp >/dev/null 2>&1 && docker-php-ext-enable amqp >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                yaml)
+                  apk add --no-cache yaml-dev >/dev/null 2>&1
+                  pecl install yaml >/dev/null 2>&1 && docker-php-ext-enable yaml >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                decimal)
+                  apk add --no-cache mpdecimal-dev >/dev/null 2>&1
+                  pecl install decimal >/dev/null 2>&1 && docker-php-ext-enable decimal >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                swoole)
+                  apk add --no-cache libstdc++ linux-headers >/dev/null 2>&1
+                  pecl install swoole >/dev/null 2>&1 && docker-php-ext-enable swoole >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                gmp)
+                  apk add --no-cache gmp-dev >/dev/null 2>&1
+                  docker-php-ext-install -j"$(nproc)" gmp >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                calendar)
+                  docker-php-ext-install -j"$(nproc)" calendar >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                pcntl)
+                  docker-php-ext-install -j"$(nproc)" pcntl >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                sysvmsg|sysvsem|sysvshm)
+                  docker-php-ext-install -j"$(nproc)" "$ext" >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                *)
+                  # Unknown — attempt the generic docker-php-ext-install
+                  # first (covers bundled extensions like bz2, shmop,
+                  # pspell, etc.) then fall back to pecl. If both fail
+                  # the extension goes on the unresolvable list and the
+                  # error page explains the situation to the user.
+                  if docker-php-ext-install -j"$(nproc)" "$ext" >/dev/null 2>&1; then
+                    EXT_INSTALL_OK=1
+                  elif pecl install "$ext" >/dev/null 2>&1 && docker-php-ext-enable "$ext" >/dev/null 2>&1; then
+                    EXT_INSTALL_OK=1
+                  fi
+                  ;;
+              esac
+              set -e
+
+              # Verify the extension is actually loadable now — some
+              # installs "succeed" on disk but fail on load because
+              # of a missing shared lib. We only trust extension_loaded.
+              if [ "$EXT_INSTALL_OK" = "1" ] && php -r "exit(extension_loaded('$ext') ? 0 : 1);" 2>/dev/null; then
+                echo "  → ext-$ext installed OK"
+                INSTALLED_EXTS="$INSTALLED_EXTS $ext"
+              else
+                echo "  → ext-$ext install FAILED"
+                UNRESOLVABLE_EXTS="$UNRESOLVABLE_EXTS $ext"
+              fi
+            done
+          fi
+
+          if [ -n "$UNRESOLVABLE_EXTS" ]; then
+            echo "FATAL: one or more required PHP extensions could not be installed: $UNRESOLVABLE_EXTS"
+            mkdir -p /var/www/html/public
+
+            # Trim leading space so the error page looks clean.
+            UNRESOLVABLE_EXTS_DISPLAY="$(echo "$UNRESOLVABLE_EXTS" | sed 's/^ *//' | sed 's/ *$//')"
+            INSTALLED_EXTS_DISPLAY="$(echo "$INSTALLED_EXTS" | sed 's/^ *//' | sed 's/ *$//')"
+            if [ -z "$INSTALLED_EXTS_DISPLAY" ]; then
+              INSTALLED_EXTS_DISPLAY="ninguna"
+            fi
+
+            cat > /var/www/html/public/_coolify_preflight_error.html <<HTMLEOF
+          <!doctype html>
+          <html lang="es">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Coolify: Extensiones de PHP faltantes</title>
+          <style>
+          :root { color-scheme: dark }
+          * { box-sizing: border-box }
+          body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #0b0f19; color: #e5e7eb; line-height: 1.6 }
+          .wrap { max-width: 840px; margin: 0 auto; padding: 32px 20px 64px }
+          .banner { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #1c1917; border-radius: 16px; padding: 24px 28px; margin-bottom: 24px; box-shadow: 0 10px 30px rgba(245, 158, 11, 0.25) }
+          .banner h1 { margin: 0 0 8px; font-size: 24px; font-weight: 800 }
+          .banner p { margin: 0; font-size: 16px; font-weight: 500 }
+          .banner strong { color: #0c0a09 }
+          .banner code { background: rgba(12, 10, 9, 0.15); padding: 2px 8px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace }
+          .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 24px 28px; margin-bottom: 20px }
+          .card h2 { margin: 0 0 16px; font-size: 18px; color: #fff; font-weight: 700 }
+          .fix-box { background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(37, 99, 235, 0.04)); border: 1px solid rgba(59, 130, 246, 0.25) }
+          .fix-box h2 { color: #93c5fd }
+          .steps { margin: 0; padding: 0 0 0 24px }
+          .steps li { margin-bottom: 14px; padding-left: 8px; font-size: 15px; color: #e5e7eb }
+          .steps li strong { color: #fff; font-weight: 700 }
+          .big-value { display: inline-block; background: #60a5fa; color: #0c2142; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 800; font-size: 16px; padding: 4px 12px; border-radius: 6px; margin: 2px }
+          .kv { margin: 0; list-style: none; padding: 0 }
+          .kv li { margin-bottom: 10px; font-size: 14px; color: #cbd5e1 }
+          .kv li strong { color: #fff; min-width: 260px; display: inline-block }
+          code { background: #0b1220; border: 1px solid #1f2937; border-radius: 4px; padding: 2px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #e5e7eb; font-size: 13px }
+          .muted { color: #94a3b8; font-size: 13px }
+          .footer { margin-top: 24px; font-size: 12px; color: #71717a; text-align: center; line-height: 1.5 }
+          </style>
+          </head>
+          <body>
+          <div class="wrap">
+          <div class="banner">
+          <h1>⚠ Faltan extensiones de PHP</h1>
+          <p>El proyecto declara extensiones de PHP que este servicio no ha podido instalar automáticamente. El despliegue no puede continuar hasta resolverlas.</p>
+          </div>
+          <div class="card fix-box">
+          <h2>Qué hacer</h2>
+          <p style="margin:0 0 16px;font-size:15px">Las siguientes extensiones son las que no se pudieron instalar:</p>
+          <p style="margin:0 0 20px"><span class="big-value">${UNRESOLVABLE_EXTS_DISPLAY}</span></p>
+          <ol class="steps">
+          <li>Mándale este mensaje al desarrollador responsable del proyecto, con la lista de extensiones de arriba.</li>
+          <li>El desarrollador puede <strong>añadirlas a la plantilla Laravel RootKit</strong> (actualizar el template de Coolify para que las instale al arrancar) — es un cambio de una línea por extensión.</li>
+          <li>Alternativamente, si la extensión <strong>no es imprescindible</strong>, puede eliminarla del <code>composer.json</code> del proyecto y volver a desplegar.</li>
+          <li>Si la extensión es propietaria (tipo <code>ext-ioncube</code>, <code>ext-sourceguardian</code>), hay que montar un Dockerfile propio para este servicio y cambiar el tipo de servicio en Coolify.</li>
+          </ol>
+          </div>
+          <div class="card">
+          <h2>Detalles técnicos</h2>
+          <ul class="kv">
+          <li><strong>Declaradas en composer.json:</strong> <code>${REQUESTED_EXTS}</code></li>
+          <li><strong>Instaladas correctamente:</strong> <code>${INSTALLED_EXTS_DISPLAY}</code></li>
+          <li><strong>Fallaron al instalar:</strong> <code>${UNRESOLVABLE_EXTS_DISPLAY}</code></li>
+          <li><strong>PHP del contenedor:</strong> <code>${PF_CURRENT:-$(php -r 'echo PHP_VERSION;')}</code></li>
+          </ul>
+          <p class="muted" style="margin-top:16px">Este chequeo se ejecuta antes de <code>composer install</code> para ahorrarte ver el error original de composer, que no explica qué paquete del sistema instalar.</p>
+          </div>
+          <div class="footer">
+          Mensaje generado automáticamente por <strong>Laravel RootKit</strong> (Coolify).<br>
+          Para añadir soporte permanente a estas extensiones, edita la tabla de extensiones en el template del servicio.
+          </div>
+          </div>
+          </body>
+          </html>
+          HTMLEOF
+
+            chmod 644 /var/www/html/public/_coolify_preflight_error.html 2>/dev/null || true
+            chown -R www-data:www-data /var/www/html/public 2>/dev/null || true
+
+            echo "Pre-flight extensions failed — starting supervisor so nginx can serve the error page."
+            exec /usr/bin/supervisord -c /etc/supervisord.conf
+          fi
+
+          if [ -n "$INSTALLED_EXTS" ]; then
+            echo "Pre-flight extensions check: auto-installed [$INSTALLED_EXTS ]"
+          fi
+          # ============================================================
+          # END pre-flight PHP extensions check
+          # ============================================================
+
           if [ -f composer.json ]; then
             echo "Installing Composer dependencies..."
             set +e
