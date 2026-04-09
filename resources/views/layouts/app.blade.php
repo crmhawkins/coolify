@@ -357,18 +357,31 @@
                                     // this style string so nothing depends
                                     // on Tailwind state.
                                     buttonStyle() {
-                                        const common = 'display:inline-flex;align-items:center;gap:0.5rem;padding:0.375rem 0.75rem;line-height:1;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid transparent;cursor:pointer;';
+                                        // Padding is a touch more generous than
+                                        // the previous pass so the button reads
+                                        // as a real control instead of a faded
+                                        // gray ghost. 0.5rem vertical + 0.875rem
+                                        // horizontal matches what most of
+                                        // Coolify's inline buttons use.
+                                        const common = 'display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 0.875rem;line-height:1;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid transparent;cursor:pointer;';
                                         if (this.tasks.length === 0) {
-                                            // Ghost gray so it doesn't bleed into every page.
-                                            return common + 'background-color:#27272a;color:#71717a;border-color:#3f3f46;opacity:0.65;';
+                                            // Idle but visible. Slightly lighter
+                                            // background (#3f3f46 instead of
+                                            // #27272a), a near-white foreground
+                                            // (#e4e4e7), a subtle purple border
+                                            // tint to match Coolify's accent,
+                                            // and NO opacity dimming — the old
+                                            // 65% opacity made it read as
+                                            // "disabled" which isn't the intent.
+                                            return common + 'background-color:#3f3f46;color:#e4e4e7;border-color:#52525b;box-shadow:0 1px 2px rgba(0,0,0,0.3);';
                                         }
                                         if (this.failedCount > 0) {
-                                            return common + 'background-color:#dc2626;color:#ffffff;border-color:#b91c1c;';
+                                            return common + 'background-color:#dc2626;color:#ffffff;border-color:#b91c1c;box-shadow:0 1px 3px rgba(220,38,38,0.4);';
                                         }
                                         if (this.runningCount > 0) {
-                                            return common + 'background-color:#f59e0b;color:#ffffff;border-color:#d97706;animation:ct-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;';
+                                            return common + 'background-color:#f59e0b;color:#ffffff;border-color:#d97706;box-shadow:0 1px 3px rgba(245,158,11,0.4);animation:ct-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;';
                                         }
-                                        return common + 'background-color:#16a34a;color:#ffffff;border-color:#15803d;';
+                                        return common + 'background-color:#16a34a;color:#ffffff;border-color:#15803d;box-shadow:0 1px 3px rgba(22,163,74,0.4);';
                                     },
                                     taskRowStyle(task) {
                                         const common = 'padding:0.75rem 1rem;border-bottom:1px solid #27272a;';
