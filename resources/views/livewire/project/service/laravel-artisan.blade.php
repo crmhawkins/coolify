@@ -39,12 +39,33 @@
                     <label class="block text-sm font-medium dark:text-white mb-2">Comando:</label>
 
                     <div class="flex items-start w-full gap-2">
-                        <div class="relative flex-1 min-w-0">
+                        {{-- x-data holds a small confirm helper bound to
+                             Enter. We deliberately don't attach
+                             wire:confirm directly to wire:keydown.enter
+                             because Livewire's confirm modal swallows
+                             the Enter key and the command never runs.
+                             Doing the confirm client-side and then
+                             dispatching $wire.run() gives us the same
+                             safety net without breaking the keyboard
+                             flow. --}}
+                        <div
+                            class="relative flex-1 min-w-0"
+                            x-data="{
+                                confirmAndRun() {
+                                    const cmd = ($wire.selectedCommand || '').trim();
+                                    if (cmd === '') { return; }
+                                    const msg = '¿Ejecutar \"php artisan ' + cmd + '\" contra el contenedor? Esto puede ser destructivo si el comando modifica la base de datos o el filesystem.';
+                                    if (window.confirm(msg)) {
+                                        $wire.run();
+                                    }
+                                }
+                            }"
+                        >
                             <input
                                 type="text"
                                 wire:model.live.debounce.200ms="selectedCommand"
                                 wire:focus="showPopularCommands"
-                                wire:keydown.enter.prevent="run"
+                                x-on:keydown.enter.prevent="confirmAndRun()"
                                 class="input w-full min-w-0"
                                 placeholder="Ej: migrate --force"
                                 autocomplete="off"
@@ -99,6 +120,7 @@
                                 wire:click="run"
                                 wire:loading.attr="disabled"
                                 wire:target="run"
+                                wire:confirm="¿Ejecutar el comando artisan contra el contenedor? Esto puede ser destructivo si el comando modifica la base de datos o el filesystem."
                                 class="h-10 px-4 rounded font-semibold text-sm transition-all"
                                 style="background-color:#8b5cf6;color:#ffffff;box-shadow:0 1px 3px rgba(139,92,246,0.4);"
                                 onmouseover="this.style.backgroundColor='#7c3aed'"

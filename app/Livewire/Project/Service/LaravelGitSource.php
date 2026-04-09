@@ -27,7 +27,10 @@ class LaravelGitSource extends Component
     public function mount(): void
     {
         $this->parameters = get_route_parameters();
-        $this->service = Service::whereUuid(request()->route('service_uuid'))->firstOrFail();
+        // Team scoping: see LaravelManager::mount() for the rationale.
+        $this->service = Service::ownedByCurrentTeam()
+            ->whereUuid(request()->route('service_uuid'))
+            ->firstOrFail();
         $this->authorize('view', $this->service);
 
         if (! $this->isLaravelRootkitStack()) {
@@ -57,8 +60,24 @@ class LaravelGitSource extends Component
 
         $this->validate([
             'repositoryUrl' => 'required|url|max:500',
-            'gitBranch' => 'required|string|max:120',
+            // Git refnames are [a-zA-Z0-9._/-] per git-check-ref-format(1).
+            // We additionally disallow leading/trailing dashes and slashes
+            // and the `..` sequence which git itself rejects. This catches
+            // typos and would-be injection attempts before they reach the
+            // shell (which escapeshellarg also protects, but refusing
+            // invalid names at the validation layer gives the user a
+            // clean error message instead of a cryptic git failure).
+            'gitBranch' => [
+                'required',
+                'string',
+                'max:120',
+                'regex:/^(?!-)(?!\/)[a-zA-Z0-9._\/-]+(?<!\/)(?<!\.lock)$/',
+                'not_regex:/\.\./',
+            ],
             'githubToken' => 'nullable|string|max:500',
+        ], [
+            'gitBranch.regex' => 'El nombre de la rama contiene caracteres no permitidos. Usa solo letras, números, puntos, guiones, barras y guiones bajos.',
+            'gitBranch.not_regex' => 'El nombre de la rama no puede contener "..".',
         ]);
 
         $fields = collect([

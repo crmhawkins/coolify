@@ -139,11 +139,57 @@ class LaravelManager extends Component
         'realpath_cache_ttl' => '600',
     ];
 
+    /**
+     * Per-directive validation bounds. Anchored to each key we expose in
+     * the UI, NOT the raw php.ini universe — this is both a value-range
+     * check AND an implicit whitelist: if a key is missing from this
+     * table, validatePhpIniValue() rejects it outright.
+     *
+     * Size directives (upload_max_filesize, memory_limit, …) express
+     * their min/max in BYTES so the parser and the comparison share the
+     * same unit. Time directives are seconds, count directives are the
+     * raw integer. `allow_minus_one`/`allow_zero` enable the special
+     * sentinel values PHP accepts for "unlimited"/"disabled".
+     *
+     * @var array<string, array{min?: int, max?: int, unit: string, allow_minus_one?: bool, allow_zero?: bool}>
+     */
+    private const PHP_INI_BOUNDS = [
+        // 1 MiB .. 5 GiB — covers typical dumps and rules out ridiculous values
+        'upload_max_filesize' => ['min' => 1048576, 'max' => 5368709120, 'unit' => 'bytes'],
+        'post_max_size' => ['min' => 1048576, 'max' => 5368709120, 'unit' => 'bytes'],
+        // 64 MiB .. 8 GiB, -1 explicitly permitted because Laravel docs
+        // recommend it for artisan long-running jobs.
+        'memory_limit' => ['min' => 67108864, 'max' => 8589934592, 'unit' => 'bytes', 'allow_minus_one' => true],
+        // 0..3600 seconds (0 = unlimited, per PHP docs).
+        'max_execution_time' => ['min' => 0, 'max' => 3600, 'unit' => 'seconds', 'allow_zero' => true],
+        // -1..3600 seconds (-1 = inherit from max_execution_time).
+        'max_input_time' => ['min' => 0, 'max' => 3600, 'unit' => 'seconds', 'allow_zero' => true, 'allow_minus_one' => true],
+        // 100..100k input vars; below 100 Laravel breaks, above 100k is a smell.
+        'max_input_vars' => ['min' => 100, 'max' => 100000, 'unit' => 'count'],
+        // 1..1000 files per request.
+        'max_file_uploads' => ['min' => 1, 'max' => 1000, 'unit' => 'count'],
+        // OPcache values are raw integers in MB / file count, not byte-prefixed.
+        'opcache.memory_consumption' => ['min' => 32, 'max' => 4096, 'unit' => 'count'],
+        'opcache.max_accelerated_files' => ['min' => 1000, 'max' => 1000000, 'unit' => 'count'],
+        'opcache.revalidate_freq' => ['min' => 0, 'max' => 3600, 'unit' => 'seconds', 'allow_zero' => true],
+        // 16 KiB .. 64 MiB for the realpath cache — anything below 16K is
+        // useless, anything above 64M is wasteful on a PHP-FPM worker.
+        'realpath_cache_size' => ['min' => 16384, 'max' => 67108864, 'unit' => 'bytes'],
+        'realpath_cache_ttl' => ['min' => 0, 'max' => 86400, 'unit' => 'seconds', 'allow_zero' => true],
+    ];
+
     public function mount()
     {
         try {
             $this->parameters = get_route_parameters();
-            $this->service = Service::whereUuid(request()->route('service_uuid'))->firstOrFail();
+            // Team scoping: Service::ownedByCurrentTeam() filters by
+            // environment.project.team.id so a user can never load a
+            // service from another team even by knowing its UUID.
+            // The authorize('view', ...) call below is defense in depth
+            // in case the scope gets bypassed somewhere upstream.
+            $this->service = Service::ownedByCurrentTeam()
+                ->whereUuid(request()->route('service_uuid'))
+                ->firstOrFail();
             $this->authorize('view', $this->service);
             $this->applications = $this->service->applications->sort();
             $this->detectLaravelContainers();
@@ -169,43 +215,77 @@ class LaravelManager extends Component
         }
     }
 
+    /**
+     * Containers the Laravel Manager UI is allowed to operate on. The
+     * RootKit stack always has the same layout (laravel, nginx, mariadb,
+     * phpmyadmin, optional scheduler/queue workers), so instead of the
+     * old "image contains php" heuristic — which was too lax and matched
+     * any PHP image in the universe — we combine a hard blacklist of
+     * database/broker roles with an explicit whitelist for phpmyadmin
+     * and nginx (both legitimately do not have an artisan file but still
+     * show up in the UI, see the blade info cards).
+     *
+     * For anything else we REQUIRE the strong check (container is
+     * running AND `/var/www/html/artisan` exists inside it). This
+     * eliminates false positives like "random Symfony/WordPress
+     * container with APP_ENV defined would match on env-vars alone".
+     */
     public function isLaravelContainer($application): bool
     {
-        // Check if image contains laravel or php
-        $image = strtolower($application->image ?? '');
-        if (str_contains($image, 'laravel') || str_contains($image, 'php')) {
+        $name = strtolower((string) ($application->name ?? ''));
+        $image = strtolower((string) ($application->image ?? ''));
+
+        // Hard blacklist: database/broker/cache containers are never
+        // "Laravel" containers. This also spares us from firing a docker
+        // exec into every mariadb/redis/… on every page load.
+        foreach ([
+            'mariadb', 'mysql', 'postgres', 'postgresql', 'redis',
+            'mongo', 'mongodb', 'memcached', 'rabbitmq', 'kafka',
+            'clickhouse', 'keydb', 'dragonfly', 'valkey',
+            'elasticsearch', 'opensearch', 'minio', 'meilisearch',
+            'typesense',
+        ] as $blacklisted) {
+            if (str_contains($name, $blacklisted) || str_contains($image, $blacklisted)) {
+                return false;
+            }
+        }
+
+        // Explicit whitelists: phpmyadmin and nginx are allowed in the
+        // Manager UI even though they have no artisan. The blade shows
+        // them info cards explaining why the .env editor is read-only
+        // (nginx shares the laravel volume) or unavailable (phpmyadmin
+        // has no Laravel .env at all), and phpmyadmin still needs the
+        // php.ini editor for things like upload_max_filesize on big
+        // SQL dump imports.
+        if (str_contains($name, 'phpmyadmin') || str_contains($image, 'phpmyadmin')) {
+            return true;
+        }
+        if (str_contains($name, 'nginx') || str_contains($image, 'nginx')) {
             return true;
         }
 
-        // Check environment variables
-        $envVars = $application->environment_variables()->get();
-        foreach ($envVars as $envVar) {
-            $key = strtoupper($envVar->key ?? '');
-            if (str_contains($key, 'LARAVEL') || str_contains($key, 'APP_KEY') || str_contains($key, 'APP_ENV')) {
-                return true;
-            }
+        // Strong check for everything else. Container must be running
+        // and `/var/www/html/artisan` must exist inside it — no more
+        // inferring Laravel-ness from the word "php" in the image or
+        // APP_ENV in the env vars.
+        if (! str($application->status)->contains('running')) {
+            return false;
         }
 
-        // Check if artisan exists (if container is running)
-        if (str($application->status)->contains('running')) {
-            try {
-                $server = $application->service->server;
-                $containerName = $application->name.'-'.$this->service->uuid;
-                $escapedContainer = escapeshellarg($containerName);
-                $command = "docker exec {$escapedContainer} sh -c 'test -f /var/www/html/artisan && echo found || echo notfound'";
-                if ($server->isNonRoot()) {
-                    $command = "sudo {$command}";
-                }
-                $output = trim(instant_remote_process([$command], $server, false) ?? '');
-                if ($output === 'found') {
-                    return true;
-                }
-            } catch (\Throwable $e) {
-                // Continue to next check
+        try {
+            $server = $application->service->server;
+            $containerName = $application->name.'-'.$this->service->uuid;
+            $escapedContainer = escapeshellarg($containerName);
+            $command = "docker exec {$escapedContainer} sh -c 'test -f /var/www/html/artisan && echo found || echo notfound'";
+            if ($server->isNonRoot()) {
+                $command = "sudo {$command}";
             }
-        }
+            $output = trim(instant_remote_process([$command], $server, false) ?? '');
 
-        return false;
+            return $output === 'found';
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     public function loadEnvVariables()
@@ -280,6 +360,11 @@ class LaravelManager extends Component
             // Store the complete .env content
             $this->envContent = $envContent;
 
+            // Tell the Alpine wrapper around the textarea to mark the
+            // current value as the new baseline, so the "cambios sin
+            // guardar" indicator disappears and the beforeunload
+            // warning does not fire after a reload.
+            $this->dispatch('env-reloaded');
             $this->dispatch('success', 'Archivo .env cargado exitosamente.');
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Error loading .env file: '.$e->getMessage());
@@ -341,11 +426,36 @@ class LaravelManager extends Component
             if ($server->isNonRoot()) {
                 $cleanCommand = "sudo {$cleanCommand}";
             }
-            instant_remote_process([$cleanCommand], $server, false);
+            $this->safeRemoteCleanup($cleanCommand, $server, 'laravel-env tmp file');
 
+            // Tell the Alpine wrapper to mark the current textarea value
+            // as clean so the "cambios sin guardar" banner disappears and
+            // the beforeunload warning stops firing.
+            $this->dispatch('env-saved');
             $this->dispatch('success', 'Archivo .env guardado exitosamente.');
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Error guardando archivo .env: '.$e->getMessage());
+        }
+    }
+
+    /**
+     * Best-effort cleanup of remote temporary files. Wraps the SSH call in
+     * a try/catch + logs any failure via \Log::warning so /tmp leaks on the
+     * Docker host become visible instead of silently piling up. Always
+     * returns so the caller never has to worry about cleanup aborting the
+     * happy path after a successful save.
+     */
+    private function safeRemoteCleanup(string $command, Server $server, string $context): void
+    {
+        try {
+            instant_remote_process([$command], $server, true);
+        } catch (\Throwable $e) {
+            \Log::warning('LaravelManager: remote tmp cleanup failed', [
+                'service_id' => $this->service->id ?? null,
+                'server' => $server->ip ?? null,
+                'context' => $context,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 
@@ -469,6 +579,9 @@ class LaravelManager extends Component
                 $this->phpIniEditableValues[$i] = (string) ($this->phpIniSettings[$key] ?? '');
             }
 
+            // Tell the Alpine wrapper around the ini form to mark the
+            // current values as the new baseline; mirrors env-reloaded.
+            $this->dispatch('phpini-reloaded');
             $this->dispatch('success', 'PHP settings loaded successfully.');
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Error loading PHP settings: '.$e->getMessage());
@@ -499,6 +612,10 @@ class LaravelManager extends Component
         foreach (self::PHP_INI_EDITABLE_KEYS as $i => $key) {
             $this->phpIniEditableValues[$i] = (string) ($defaults[$key] ?? '');
         }
+        // Applying defaults should NOT reset the dirty flag — the user
+        // has to click "Guardar" to persist. That's why we explicitly do
+        // NOT dispatch phpini-reloaded here: the form is legitimately
+        // dirty until save.
         $this->dispatch('success', "Defaults recomendados para {$label} aplicados. Pulsa \"Guardar\" para persistirlos.");
     }
 
@@ -536,13 +653,12 @@ class LaravelManager extends Component
             $containerName = $container['container_name'];
             $escapedContainer = escapeshellarg($containerName);
 
-            // Validate + normalise each editable value. The allow-list
-            // matches PHP ini size syntax (digits with optional K/M/G
-            // suffix) OR a plain integer, OR a plain minus sign for
-            // "-1" style disables (max_input_time, max_execution_time).
-            // Anything else is rejected and we bail with a clear error
-            // so the user can fix the input. Indexed lookup because the
-            // wire:model paths are positional, not associative.
+            // Validate every editable value against the per-directive bounds
+            // table (PHP_INI_BOUNDS). Each failure short-circuits with a
+            // Spanish error message that names the key, the bad value, and
+            // the accepted range so the user can fix it without hunting
+            // through the PHP manual. Empty string = "leave at php.ini
+            // default", so we skip it (no override line written).
             $lines = [];
             $lines[] = '; Auto-generated by Coolify Laravel Manager';
             $lines[] = '; Editable from Project → Service → Laravel Manager';
@@ -552,8 +668,9 @@ class LaravelManager extends Component
                 if ($value === '') {
                     continue;
                 }
-                if (! preg_match('/^-?\d+([KMG]|k|m|g)?$/', $value)) {
-                    $this->dispatch('error', "Valor inválido para {$key}: \"{$value}\". Usa un número entero con sufijo opcional K/M/G (ej: 512M) o -1 para deshabilitar.");
+                $error = $this->validatePhpIniValue($key, $value);
+                if ($error !== null) {
+                    $this->dispatch('error', $error);
 
                     return;
                 }
@@ -590,7 +707,7 @@ class LaravelManager extends Component
             if ($server->isNonRoot()) {
                 $reloadCommand = "sudo {$reloadCommand}";
             }
-            instant_remote_process([$reloadCommand], $server, false);
+            $this->safeRemoteCleanup($reloadCommand, $server, 'php-fpm SIGUSR2 reload');
 
             // Cleanup host + remote tmp copies.
             Storage::disk('local')->delete($tmpFilename);
@@ -598,8 +715,9 @@ class LaravelManager extends Component
             if ($server->isNonRoot()) {
                 $cleanCommand = "sudo {$cleanCommand}";
             }
-            instant_remote_process([$cleanCommand], $server, false);
+            $this->safeRemoteCleanup($cleanCommand, $server, 'laravel-php-ini tmp file');
 
+            $this->dispatch('phpini-saved');
             $this->dispatch('success', 'Configuración PHP guardada. Si no se ve reflejada, reinicia el contenedor.');
 
             // Reload so the form reflects whatever PHP actually accepted
@@ -610,6 +728,130 @@ class LaravelManager extends Component
         } finally {
             $this->isSavingPhpIni = false;
         }
+    }
+
+    /**
+     * Parse a PHP ini-style size/count value (like "512M", "4096K" or
+     * "-1") into an integer in the directive's native unit. Returns null
+     * if the input is syntactically malformed. Exposed as a private
+     * instance method so unit tests and the validator can share the
+     * exact same parsing logic without exporting state.
+     *
+     * Note: for directives whose `unit` is `count` or `seconds` we do
+     * NOT apply the K/M/G suffix — PHP itself ignores those suffixes for
+     * numeric directives like opcache.memory_consumption. The validator
+     * below keys the unit off PHP_INI_BOUNDS so we do the right thing.
+     */
+    public static function parsePhpIniValue(string $value, string $unit = 'bytes'): ?int
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return null;
+        }
+        if (! preg_match('/^(-?\d+)([KMGkmg])?$/', $trimmed, $m)) {
+            return null;
+        }
+        $n = (int) $m[1];
+        $suffix = strtoupper((string) ($m[2] ?? ''));
+
+        if ($unit !== 'bytes' && $suffix !== '') {
+            // K/M/G are only valid on byte-sized directives; reject them
+            // for seconds and count directives so users don't set
+            // opcache.memory_consumption="128M" thinking it means bytes.
+            return null;
+        }
+
+        return match ($suffix) {
+            'K' => $n * 1024,
+            'M' => $n * 1024 * 1024,
+            'G' => $n * 1024 * 1024 * 1024,
+            default => $n,
+        };
+    }
+
+    /**
+     * Validate a single php.ini value against the per-directive bounds
+     * table. Returns null on success or a user-facing Spanish error
+     * message on failure. The returned string is safe to dispatch as an
+     * error toast — it names the directive, the offending value and the
+     * accepted range.
+     */
+    public static function validatePhpIniValue(string $key, string $raw): ?string
+    {
+        $bounds = self::PHP_INI_BOUNDS[$key] ?? null;
+        if ($bounds === null) {
+            // Whitelist enforcement: any key that isn't in PHP_INI_BOUNDS
+            // is not writable through this editor even if it somehow
+            // reaches this method. Belt-and-braces against a future
+            // refactor adding a key to PHP_INI_EDITABLE_KEYS without
+            // adding the matching bounds entry.
+            return "La directiva \"{$key}\" no está permitida por el editor.";
+        }
+
+        $unit = (string) ($bounds['unit'] ?? 'bytes');
+        $parsed = self::parsePhpIniValue($raw, $unit);
+        if ($parsed === null) {
+            $hint = $unit === 'bytes'
+                ? 'Formato esperado: entero con sufijo opcional K/M/G (ej: 512M).'
+                : 'Formato esperado: entero sin sufijo (ej: 300).';
+
+            return "Valor inválido para {$key}: \"{$raw}\". {$hint}";
+        }
+
+        if ($parsed === -1) {
+            return ($bounds['allow_minus_one'] ?? false)
+                ? null
+                : "El valor -1 no está permitido para {$key}.";
+        }
+
+        if ($parsed === 0 && ! ($bounds['allow_zero'] ?? false)) {
+            return "El valor 0 no está permitido para {$key}.";
+        }
+
+        if ($parsed < 0) {
+            return "Valor negativo no permitido para {$key}: \"{$raw}\".";
+        }
+
+        if (isset($bounds['min']) && $parsed < $bounds['min']) {
+            $min = self::formatPhpIniBound($bounds['min'], $unit);
+
+            return "Valor demasiado bajo para {$key}: \"{$raw}\". Mínimo permitido: {$min}.";
+        }
+        if (isset($bounds['max']) && $parsed > $bounds['max']) {
+            $max = self::formatPhpIniBound($bounds['max'], $unit);
+
+            return "Valor demasiado alto para {$key}: \"{$raw}\". Máximo permitido: {$max}.";
+        }
+
+        return null;
+    }
+
+    /**
+     * Human-readable rendering of a validation bound for error messages.
+     * Converts bytes back to the nearest K/M/G suffix so users see
+     * "512M" instead of "536870912".
+     */
+    public static function formatPhpIniBound(int $bound, string $unit): string
+    {
+        if ($unit === 'bytes') {
+            if ($bound >= 1024 * 1024 * 1024 && $bound % (1024 * 1024 * 1024) === 0) {
+                return ((int) ($bound / 1024 / 1024 / 1024)).'G';
+            }
+            if ($bound >= 1024 * 1024 && $bound % (1024 * 1024) === 0) {
+                return ((int) ($bound / 1024 / 1024)).'M';
+            }
+            if ($bound >= 1024 && $bound % 1024 === 0) {
+                return ((int) ($bound / 1024)).'K';
+            }
+
+            return (string) $bound;
+        }
+
+        if ($unit === 'seconds') {
+            return $bound.'s';
+        }
+
+        return (string) $bound;
     }
 
     public function render()

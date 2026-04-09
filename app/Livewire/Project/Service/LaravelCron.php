@@ -44,7 +44,10 @@ class LaravelCron extends Component
     public function mount(): void
     {
         $this->parameters = get_route_parameters();
-        $this->service = Service::whereUuid(request()->route('service_uuid'))->firstOrFail();
+        // Team scoping: see LaravelManager::mount() for the rationale.
+        $this->service = Service::ownedByCurrentTeam()
+            ->whereUuid(request()->route('service_uuid'))
+            ->firstOrFail();
         $this->authorize('view', $this->service);
         $this->applications = $this->service->applications->sort();
         $this->detectLaravelContainers();
@@ -494,12 +497,30 @@ class LaravelCron extends Component
         return $result;
     }
 
+    /**
+     * Strips everything that will confuse the JSON / plain-text parsers
+     * downstream from the raw `schedule:list` output:
+     *   - ANSI color escape sequences (Laravel 11+ emits them by default)
+     *   - PHP deprecation / notice / warning / fatal / strict lines and
+     *     their continuation frames ("in /path/to/file.php on line N")
+     *   - Xdebug callstack headers
+     *   - Known noisy third-party vendor warnings we have already seen
+     *     leak into this output in the wild
+     *   - Everything BEFORE the first '{' or '[' when the output looks
+     *     like JSON (Laravel sometimes prints a banner before the data)
+     */
     private function sanitizeScheduleCommandOutput(string $raw): string
     {
         $raw = preg_replace('/\e\[[\d;]*[A-Za-z]/', '', $raw) ?? $raw;
 
         $lines = preg_split('/\r?\n/', $raw) ?: [];
         $cleaned = [];
+
+        // Regex catches every PHP runtime notice prefix, with or without
+        // the leading "PHP " that cli sapi adds. Anchored at start-of-
+        // trimmed-line so a legit task command that happens to contain
+        // the word "warning" is not dropped.
+        $noisePrefixRegex = '/^(PHP\s+)?(Deprecated|Notice|Warning|Strict Standards|Fatal error|Parse error|Recoverable fatal error):/i';
 
         foreach ($lines as $line) {
             $trimmed = trim($line);
@@ -510,10 +531,18 @@ class LaravelCron extends Component
                 continue;
             }
 
-            if (str_starts_with($trimmed, 'Deprecated:')
-                || str_starts_with($trimmed, 'PHP Deprecated:')
-                || str_starts_with($trimmed, 'Warning:')
-                || str_starts_with($trimmed, 'PHP Warning:')) {
+            if (preg_match($noisePrefixRegex, $trimmed)) {
+                continue;
+            }
+
+            // "in /path/to/file.php on line N" continuation frames that
+            // Xdebug / php-fpm append after a warning.
+            if (preg_match('/\s+in\s+\/[^ ]+\.php\s+on\s+line\s+\d+\s*$/', $trimmed)) {
+                continue;
+            }
+
+            // Xdebug stack frame header.
+            if (str_starts_with($trimmed, 'Stack trace:')) {
                 continue;
             }
 
@@ -524,7 +553,26 @@ class LaravelCron extends Component
             $cleaned[] = $line;
         }
 
-        return trim(implode("\n", $cleaned));
+        $joined = trim(implode("\n", $cleaned));
+
+        // If the cleaned output looks like JSON-with-a-prefix (anything
+        // before the first { or [), drop the prefix so json_decode()
+        // downstream succeeds. This handles the "Laravel prints a
+        // banner before the JSON" case that the old parser fell off
+        // when silently going to the source-grep fallback.
+        if ($joined !== '' && preg_match('/[\{\[]/', $joined, $_, PREG_OFFSET_CAPTURE)) {
+            $firstBrace = strpos($joined, '{');
+            $firstBracket = strpos($joined, '[');
+            $candidates = array_filter([$firstBrace, $firstBracket], fn ($p) => $p !== false);
+            if ($candidates !== []) {
+                $cut = min($candidates);
+                if ($cut > 0) {
+                    $joined = substr($joined, $cut);
+                }
+            }
+        }
+
+        return $joined;
     }
 
     /**

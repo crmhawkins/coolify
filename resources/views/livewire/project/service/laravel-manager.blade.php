@@ -197,19 +197,67 @@
                                     Este proyecto no tiene <span class="font-mono">.env</span>
                                 </div>
                             @else
-                                <div>
+                                {{-- Dirty-tracking wrapper. Captures the
+                                     textarea value at mount time as the
+                                     "initial" baseline, flips a dirty
+                                     flag on every input event, and
+                                     attaches a beforeunload listener
+                                     that warns the user before they
+                                     lose changes by navigating away.
+                                     Listens for env-reloaded / env-saved
+                                     events from the PHP side to reset
+                                     the baseline after a fresh load or
+                                     a successful save. --}}
+                                <div
+                                    x-data="{
+                                        initialEnv: '',
+                                        isDirty: false,
+                                        beforeUnloadHandler: null,
+                                        init() {
+                                            this.initialEnv = (this.$refs.envTextarea && this.$refs.envTextarea.value) || '';
+                                            this.isDirty = false;
+                                            this.beforeUnloadHandler = (e) => {
+                                                if (this.isDirty) {
+                                                    e.preventDefault();
+                                                    e.returnValue = 'Tienes cambios sin guardar en el archivo .env. ¿Seguro que quieres salir?';
+                                                    return e.returnValue;
+                                                }
+                                            };
+                                            window.addEventListener('beforeunload', this.beforeUnloadHandler);
+                                        },
+                                        destroy() {
+                                            if (this.beforeUnloadHandler) {
+                                                window.removeEventListener('beforeunload', this.beforeUnloadHandler);
+                                                this.beforeUnloadHandler = null;
+                                            }
+                                        },
+                                        checkDirty() {
+                                            const current = (this.$refs.envTextarea && this.$refs.envTextarea.value) || '';
+                                            this.isDirty = current !== this.initialEnv;
+                                        },
+                                        markClean() {
+                                            const current = (this.$refs.envTextarea && this.$refs.envTextarea.value) || '';
+                                            this.initialEnv = current;
+                                            this.isDirty = false;
+                                        }
+                                    }"
+                                    x-on:env-reloaded.window="markClean()"
+                                    x-on:env-saved.window="markClean()"
+                                >
                                     <label for="env_content" class="block text-xs font-medium mb-1.5" style="color:#e4e4e7;">
                                         Contenido del archivo <span class="font-mono" style="color:#c4b5fd;">.env</span>
                                     </label>
                                     <textarea
                                         id="env_content"
+                                        x-ref="envTextarea"
                                         wire:model="envContent"
+                                        x-on:input="checkDirty()"
                                         rows="18"
                                         class="w-full rounded px-3 py-2 text-sm font-mono resize-y"
                                         style="background-color:#0a0a0a;color:#e4e4e7;border:1px solid #3f3f46;min-height:320px;line-height:1.5;"
                                         spellcheck="false"
                                     ></textarea>
-                                    <div class="mt-3 flex flex-wrap gap-2">
+                                    <div class="mt-3 flex flex-wrap items-center gap-2">
                                         <button
                                             type="button"
                                             wire:click="saveEnvFile"
@@ -228,6 +276,7 @@
                                             wire:click="loadEnvVariables"
                                             wire:loading.attr="disabled"
                                             wire:target="loadEnvVariables"
+                                            wire:confirm="¿Recargar el .env desde el contenedor? Se descartarán los cambios sin guardar que tengas en el editor."
                                             class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
                                             style="background-color:#27272a;color:#e4e4e7;border:1px solid #3f3f46;"
                                             onmouseover="this.style.backgroundColor='#3f3f46'"
@@ -236,6 +285,17 @@
                                             <span wire:loading.remove wire:target="loadEnvVariables">Recargar</span>
                                             <span wire:loading wire:target="loadEnvVariables">Cargando…</span>
                                         </button>
+                                        <span
+                                            x-show="isDirty"
+                                            x-cloak
+                                            class="inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-semibold"
+                                            style="background-color:rgba(245,158,11,0.12);color:#fcd34d;border:1px solid rgba(245,158,11,0.35);"
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                            </svg>
+                                            Tienes cambios sin guardar
+                                        </span>
                                     </div>
                                 </div>
                             @endif
@@ -324,7 +384,58 @@
                                      why we can't use the ini key as the
                                      wire:model path (Livewire treats dots
                                      as nested array access and breaks
-                                     `opcache.memory_consumption`). --}}
+                                     `opcache.memory_consumption`).
+
+                                     Wrapped in an Alpine component that
+                                     tracks dirty state by serialising
+                                     every input's value into a single
+                                     string and comparing against the
+                                     baseline captured on init. Any input
+                                     event flips the flag and a
+                                     beforeunload handler blocks
+                                     navigation until the user saves or
+                                     explicitly discards. --}}
+                                <div
+                                    x-data="{
+                                        initialSnapshot: '',
+                                        isDirty: false,
+                                        beforeUnloadHandler: null,
+                                        snapshot() {
+                                            const inputs = this.$root.querySelectorAll('input[data-ini-key]');
+                                            return Array.from(inputs)
+                                                .map(i => i.dataset.iniKey + '=' + (i.value || ''))
+                                                .join('\n');
+                                        },
+                                        init() {
+                                            this.initialSnapshot = this.snapshot();
+                                            this.isDirty = false;
+                                            this.beforeUnloadHandler = (e) => {
+                                                if (this.isDirty) {
+                                                    e.preventDefault();
+                                                    e.returnValue = 'Tienes cambios sin guardar en la configuración de PHP. ¿Seguro que quieres salir?';
+                                                    return e.returnValue;
+                                                }
+                                            };
+                                            window.addEventListener('beforeunload', this.beforeUnloadHandler);
+                                        },
+                                        destroy() {
+                                            if (this.beforeUnloadHandler) {
+                                                window.removeEventListener('beforeunload', this.beforeUnloadHandler);
+                                                this.beforeUnloadHandler = null;
+                                            }
+                                        },
+                                        checkDirty() {
+                                            this.isDirty = this.snapshot() !== this.initialSnapshot;
+                                        },
+                                        markClean() {
+                                            this.initialSnapshot = this.snapshot();
+                                            this.isDirty = false;
+                                        }
+                                    }"
+                                    x-on:phpini-reloaded.window="markClean()"
+                                    x-on:phpini-saved.window="markClean()"
+                                    x-on:input.debounce.50ms="checkDirty()"
+                                >
                                 @php
                                     $phpIniDescriptions = [
                                         'upload_max_filesize' => 'Tamaño máximo de un archivo subido (ej: 100M)',
@@ -365,6 +476,7 @@
                                                 id="php_ini_{{ $idx }}"
                                                 type="text"
                                                 wire:model="phpIniEditableValues.{{ $idx }}"
+                                                data-ini-key="{{ $setting }}"
                                                 class="w-full rounded-md px-3 py-2 text-sm font-mono font-semibold transition-colors focus:outline-none"
                                                 style="background-color:#18181b;color:#c4b5fd;border:1px solid #3f3f46;"
                                                 onfocus="this.style.borderColor='#8b5cf6';this.style.boxShadow='0 0 0 2px rgba(139,92,246,0.2)'"
@@ -392,7 +504,7 @@
                                     Si no se refleja al instante, reinicia el contenedor desde Coolify.
                                 </div>
 
-                                <div class="flex flex-wrap gap-2 pt-1">
+                                <div class="flex flex-wrap items-center gap-2 pt-1">
                                     <button
                                         type="button"
                                         wire:click="savePhpIniSettings"
@@ -428,6 +540,7 @@
                                         wire:click="loadPhpIniSettings"
                                         wire:loading.attr="disabled"
                                         wire:target="loadPhpIniSettings"
+                                        wire:confirm="¿Recargar los valores desde el contenedor? Se descartarán los cambios sin guardar que tengas en el formulario."
                                         class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
                                         style="background-color:#27272a;color:#e4e4e7;border:1px solid #3f3f46;"
                                         onmouseover="this.style.backgroundColor='#3f3f46'"
@@ -436,7 +549,19 @@
                                         <span wire:loading.remove wire:target="loadPhpIniSettings">Recargar valores</span>
                                         <span wire:loading wire:target="loadPhpIniSettings">Cargando…</span>
                                     </button>
+                                    <span
+                                        x-show="isDirty"
+                                        x-cloak
+                                        class="inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11px] font-semibold"
+                                        style="background-color:rgba(245,158,11,0.12);color:#fcd34d;border:1px solid rgba(245,158,11,0.35);"
+                                    >
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                        </svg>
+                                        Tienes cambios sin guardar
+                                    </span>
                                 </div>
+                                </div>{{-- /x-data php.ini dirty wrapper --}}
                             @else
                                 <div
                                     class="rounded px-3 py-2 text-xs"

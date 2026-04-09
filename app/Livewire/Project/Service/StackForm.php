@@ -387,15 +387,36 @@ class StackForm extends Component
             return;
         }
         $githubToken = trim((string) data_get($this->fields, 'SERVICE_GITHUB_TOKEN.value', ''));
-        $deployRepoUrl = $this->buildGithubUrlWithToken($repoUrl, $githubToken);
+
+        // Token-free HTTPS URL we persist into `origin`. The token is NEVER
+        // written to disk: we pass it exclusively via `git -c http.extraHeader`
+        // for the single fetch call, so `.git/config` inside the container
+        // stays clean and anyone who later opens a shell into the container
+        // cannot `cat .git/config` and exfiltrate the PAT.
+        $cleanRepoUrl = $this->buildCleanGithubHttpsUrl($repoUrl);
+
+        // Build the `-c http.extraHeader=...` fragment we splice into the
+        // single fetch invocation when a token is present. escapeshellarg
+        // wraps the whole header so colons and spaces inside the value
+        // (e.g. "Authorization: Bearer ghp_xxx") are quoted safely.
+        $fetchConfigFragment = '';
+        if ($githubToken !== '') {
+            $authHeader = 'Authorization: Bearer '.$githubToken;
+            $fetchConfigFragment = '-c http.extraHeader='.escapeshellarg($authHeader).' ';
+        }
 
         $branchRef = escapeshellarg("origin/{$branch}");
 
         $command = "cd /var/www/html"
             ." && if [ ! -d .git ]; then echo 'ERROR: Repository is not initialized in /var/www/html (.git missing).'; exit 1; fi"
             ." && CURRENT_HEAD=\"\$(git rev-parse HEAD 2>/dev/null || true)\""
-            ." && git remote set-url origin ".escapeshellarg($deployRepoUrl)
-            ." && if ! git fetch --quiet origin ".escapeshellarg($branch)."; then echo 'ERROR: git fetch failed'; exit 1; fi"
+            // Persist the clean URL (no token). Use --push=... too so both
+            // fetch and push remotes end up tokenless.
+            ." && git remote set-url origin ".escapeshellarg($cleanRepoUrl)
+            ." && git remote set-url --push origin ".escapeshellarg($cleanRepoUrl)
+            // Process-local credential injection via `git -c` — not
+            // written to .git/config, gone as soon as the git process exits.
+            ." && if ! git {$fetchConfigFragment}fetch --quiet origin ".escapeshellarg($branch)."; then echo 'ERROR: git fetch failed'; exit 1; fi"
             ." && TARGET_HEAD=\"\$(git rev-parse {$branchRef} 2>/dev/null || true)\""
             ." && if [ -z \"\$TARGET_HEAD\" ]; then echo 'ERROR: Unable to resolve target commit from remote branch.'; exit 1; fi"
             ." && if [ -n \"\$CURRENT_HEAD\" ] && [ \"\$CURRENT_HEAD\" = \"\$TARGET_HEAD\" ]; then echo 'No new commits to deploy.'; else echo 'New commits deployed:'; if [ -n \"\$CURRENT_HEAD\" ]; then git log --reverse --format='%h %s (%an)' \"\$CURRENT_HEAD..\$TARGET_HEAD\"; else git log --reverse --format='%h %s (%an)' -n 10 \"\$TARGET_HEAD\"; fi; fi"
@@ -404,8 +425,8 @@ class StackForm extends Component
             // Without it, `git checkout -B` aborts with "local changes would
             // be overwritten" on any second deploy.
             ." && if ! git checkout -f -B ".escapeshellarg($branch)." {$branchRef}; then echo 'ERROR: git checkout failed'; exit 1; fi"
-            ." && if [ -f composer.json ]; then if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then echo 'ERROR: composer install failed'; echo 'Failed at: composer install'; sed -n '1,220p' /tmp/coolify-composer-install.log; exit 1; fi; fi"
-            ." && if [ -f package.json ]; then if [ -f package-lock.json ]; then NPM_INSTALL_CMD='npm ci --no-audit --no-fund'; else NPM_INSTALL_CMD='npm install --no-audit --no-fund'; fi; if ! sh -lc \"\$NPM_INSTALL_CMD && npm run build\" >/tmp/coolify-npm-build.log 2>&1; then echo 'ERROR: frontend build failed'; echo 'Failed at: npm install/build'; sed -n '1,220p' /tmp/coolify-npm-build.log; exit 1; fi; fi"
+            ." && if [ -f composer.json ]; then if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then echo 'ERROR: composer install failed'; echo 'Failed at: composer install'; sed -n '1,500p' /tmp/coolify-composer-install.log; exit 1; fi; fi"
+            ." && if [ -f package.json ]; then if [ -f package-lock.json ]; then NPM_INSTALL_CMD='npm ci --no-audit --no-fund'; else NPM_INSTALL_CMD='npm install --no-audit --no-fund'; fi; if ! sh -lc \"\$NPM_INSTALL_CMD && npm run build\" >/tmp/coolify-npm-build.log 2>&1; then echo 'ERROR: frontend build failed'; echo 'Failed at: npm install/build'; sed -n '1,500p' /tmp/coolify-npm-build.log; exit 1; fi; fi"
             ." && if [ -f .env ]; then if grep -Eq '^ASSET_URL=' .env; then sed -i 's|^ASSET_URL=.*|ASSET_URL=|' .env; else echo 'ASSET_URL=' >> .env; fi; fi"
             // Clear first (so new code is picked up), then re-cache config/
             // routes/views so the first request after deploy doesn't pay the
@@ -450,8 +471,8 @@ class StackForm extends Component
             ."php artisan migrate:status --no-ansi || true; "
             ."MIGRATION_OUTPUT_FILE=/tmp/coolify-migrate-output.log; "
             ."if php artisan migrate --force --no-ansi >\"\$MIGRATION_OUTPUT_FILE\" 2>&1; then "
-            ."if [ -s \"\$MIGRATION_OUTPUT_FILE\" ]; then echo 'Migrations completed with output:'; sed -n '1,220p' \"\$MIGRATION_OUTPUT_FILE\"; else echo 'Migrations completed successfully with no warnings.'; fi; "
-            ."else echo 'ERROR: migrations failed'; echo 'Failed at: php artisan migrate --force'; sed -n '1,220p' \"\$MIGRATION_OUTPUT_FILE\"; exit 1; fi; "
+            ."if [ -s \"\$MIGRATION_OUTPUT_FILE\" ]; then echo 'Migrations completed with output:'; sed -n '1,500p' \"\$MIGRATION_OUTPUT_FILE\"; else echo 'Migrations completed successfully with no warnings.'; fi; "
+            ."else echo 'ERROR: migrations failed'; echo 'Failed at: php artisan migrate --force'; sed -n '1,500p' \"\$MIGRATION_OUTPUT_FILE\"; exit 1; fi; "
             ."else echo 'artisan file not found'; exit 1; fi"
         );
     }
@@ -512,8 +533,8 @@ class StackForm extends Component
             ."echo ".escapeshellarg($selectedCommand['label'])."; "
             ."MAINTENANCE_OUTPUT_FILE=/tmp/coolify-maintenance-command.log; "
             ."if sh -lc ".escapeshellarg($selectedCommand['command'])." >\"\$MAINTENANCE_OUTPUT_FILE\" 2>&1; then "
-            ."if [ -s \"\$MAINTENANCE_OUTPUT_FILE\" ]; then sed -n '1,220p' \"\$MAINTENANCE_OUTPUT_FILE\"; else echo 'Command completed successfully with no output.'; fi; "
-            ."else echo 'ERROR: maintenance command failed'; echo 'Failed at: ".addslashes($selectedCommand['label'])."'; sed -n '1,220p' \"\$MAINTENANCE_OUTPUT_FILE\"; exit 1; fi; "
+            ."if [ -s \"\$MAINTENANCE_OUTPUT_FILE\" ]; then sed -n '1,500p' \"\$MAINTENANCE_OUTPUT_FILE\"; else echo 'Command completed successfully with no output.'; fi; "
+            ."else echo 'ERROR: maintenance command failed'; echo 'Failed at: ".addslashes($selectedCommand['label'])."'; sed -n '1,500p' \"\$MAINTENANCE_OUTPUT_FILE\"; exit 1; fi; "
             ."else echo 'artisan file not found'; exit 1; fi"
         );
     }
@@ -778,6 +799,54 @@ class StackForm extends Component
         }
 
         return "https://x-access-token:{$token}@github.com{$path}";
+    }
+
+    /**
+     * Canonical, token-less HTTPS form of a GitHub repository URL. This is
+     * what we persist into `.git/config` on the container so anyone who
+     * later opens a shell (terminal UI, docker exec, file explorer…)
+     * cannot `cat .git/config` and read the embedded PAT. The actual
+     * fetch still succeeds because the token is injected at command
+     * time via `git -c http.extraHeader="Authorization: Bearer TOKEN"`
+     * in deployLaravelChanges(), which never touches disk.
+     *
+     * Accepts git@/https://github.com/owner/repo(.git) and returns the
+     * normalised https://github.com/owner/repo form. Unknown hosts fall
+     * through untouched so the caller still has something to pass to
+     * `git remote set-url`.
+     */
+    private function buildCleanGithubHttpsUrl(string $repoUrl): string
+    {
+        $url = trim($repoUrl);
+        if ($url === '') {
+            return $url;
+        }
+
+        if (str_starts_with($url, 'git@github.com:')) {
+            $path = substr($url, strlen('git@github.com:'));
+            if (! is_string($path) || $path === '') {
+                return $url;
+            }
+
+            return 'https://github.com/'.ltrim($path, '/');
+        }
+
+        if (! str_starts_with($url, 'http://') && ! str_starts_with($url, 'https://')) {
+            $url = 'https://'.$url;
+        }
+
+        $parts = parse_url($url);
+        $host = strtolower((string) ($parts['host'] ?? ''));
+        if ($host !== 'github.com' && $host !== 'www.github.com') {
+            return $repoUrl;
+        }
+
+        $path = (string) ($parts['path'] ?? '');
+        if ($path === '') {
+            return $repoUrl;
+        }
+
+        return 'https://github.com'.$path;
     }
 
     public function render()

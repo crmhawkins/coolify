@@ -164,7 +164,14 @@ class LaravelArtisan extends Component
     public function mount(): void
     {
         $this->parameters = get_route_parameters();
-        $this->service = Service::whereUuid(request()->route('service_uuid'))->firstOrFail();
+        // Team scoping: see LaravelManager::mount() for the rationale. A
+        // bare Service::whereUuid() would load a service from any team
+        // if the attacker guessed/obtained the UUID, and because the
+        // ServicePolicy currently returns true for every action, the
+        // authorize() call underneath would not catch it either.
+        $this->service = Service::ownedByCurrentTeam()
+            ->whereUuid(request()->route('service_uuid'))
+            ->firstOrFail();
         $this->authorize('view', $this->service);
         $this->applications = $this->service->applications->sort();
         $this->detectLaravelContainers();
