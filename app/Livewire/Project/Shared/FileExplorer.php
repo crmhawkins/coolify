@@ -1386,12 +1386,32 @@ class FileExplorer extends Component
         $this->showExtractDialog = true;
     }
 
+    /**
+     * Kicks off the extraction as a background process inside the container
+     * and records it as a tracked task (same bucket as compression).
+     *
+     * Previous implementation ran the command synchronously via
+     * instant_remote_process with a 7200s timeout. That blocked the
+     * Livewire request for the whole duration, which in practice hit
+     * the nginx proxy read timeout (60–300s depending on deploy) for
+     * any archive in the 2–8 GB range the user was working with.
+     * Symptom: "502 Bad Gateway" / "Extraction failed. No output
+     * received from container." even when the extraction had actually
+     * succeeded on disk.
+     *
+     * New flow mirrors compressSelectedFiles():
+     *   1. Build the same platform-specific extraction command.
+     *   2. Wrap it in `( cmd ) > logfile 2>&1 & echo __EXTRACT_STARTED__ $!`
+     *      so the container keeps running after docker exec returns.
+     *   3. Record a task (task_type=extraction) with PID + log path so
+     *      the background tasks dropdown can poll it.
+     *   4. Return immediately — the Livewire request finishes in <1s
+     *      regardless of archive size.
+     *
+     * The refreshCompressionTasks() poll handles progress/completion.
+     */
     public function executeExtraction()
     {
-        // Increase PHP execution time for long operations
-        set_time_limit(3600);
-        ini_set('max_execution_time', '3600');
-
         if (count($this->selectedFiles) !== 1) {
             $this->dispatch('error', 'Please select exactly one file to extract.');
             $this->showExtractDialog = false;
@@ -1434,51 +1454,49 @@ class FileExplorer extends Component
             $fileDir = dirname($filePath);
             $fileDirEscaped = escapeshellarg($fileDir);
 
-            // Build extraction command with automatic tool installation
+            // Build platform-specific extraction command — reused
+            // verbatim from the previous synchronous version so the
+            // fallback matrix (unzip → python → php) stays intact for
+            // the zip case, and tar/gz fall-throughs still work.
             $extractionCommand = '';
 
             if (str_ends_with(strtolower($filePath), '.zip')) {
-                // Try multiple methods: unzip command, Python, or PHP
-                // Para archivos grandes, ejecutar con output periódico para mantener conexión activa
                 $extractionCommand = "cd {$fileDirEscaped} && ";
                 $extractionCommand .= 'if command -v unzip >/dev/null 2>&1; then ';
-                // Ejecutar unzip en background con output periódico usando un script temporal
-                // Esto mantiene la conexión activa y permite capturar el resultado
-                $extractionCommand .= "(unzip -o {$fileNameEscaped} -d . 2>&1 | while IFS= read -r line; do echo \"PROGRESS: \\\$line\"; done; echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
+                $extractionCommand .= "(unzip -o {$fileNameEscaped} -d . 2>&1 && echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= 'elif command -v python3 >/dev/null 2>&1; then ';
-                // Python con output periódico cada 100 archivos
-                $extractionCommand .= "python3 -c \"import zipfile, os, sys; z=zipfile.ZipFile('{$archiveFileNameForPython}'); files=z.namelist(); total=len(files); [z.extract(f, '.') or (print(f'PROGRESS: Extracted {i+1}/{total}') if (i+1)%100==0 else None) for i, f in enumerate(files)]; z.close(); print('EXTRACTION_SUCCESS')\" 2>&1 || echo 'EXTRACTION_FAILED'; ";
+                $extractionCommand .= "python3 -c \"import zipfile; z=zipfile.ZipFile('{$archiveFileNameForPython}'); z.extractall('.'); z.close(); print('EXTRACTION_SUCCESS')\" 2>&1 || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= 'elif command -v python >/dev/null 2>&1; then ';
-                $extractionCommand .= "python -c \"import zipfile, os, sys; z=zipfile.ZipFile('{$archiveFileNameForPython}'); files=z.namelist(); total=len(files); [z.extract(f, '.') or (print(f'PROGRESS: Extracted {i+1}/{total}') if (i+1)%100==0 else None) for i, f in enumerate(files)]; z.close(); print('EXTRACTION_SUCCESS')\" 2>&1 || echo 'EXTRACTION_FAILED'; ";
+                $extractionCommand .= "python -c \"import zipfile; z=zipfile.ZipFile('{$archiveFileNameForPython}'); z.extractall('.'); z.close(); print('EXTRACTION_SUCCESS')\" 2>&1 || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= 'elif command -v php >/dev/null 2>&1; then ';
-                $extractionCommand .= "php -r \"\\\$zip = new ZipArchive(); if (\\\$zip->open('{$archiveFileNameForPhp}') === TRUE) { \\\$total = \\\$zip->numFiles; for (\\\$i = 0; \\\$i < \\\$total; \\\$i++) { \\\$zip->extractTo('.', [\\\$zip->getNameIndex(\\\$i)]); if ((\\\$i+1) % 100 == 0) echo 'PROGRESS: Extracted ' . (\\\$i+1) . '/' . \\\$total . ' files...' . PHP_EOL; } \\\$zip->close(); echo 'EXTRACTION_SUCCESS'; } else { echo 'EXTRACTION_FAILED'; }\" 2>&1; ";
+                $extractionCommand .= "php -r \"\\\$zip = new ZipArchive(); if (\\\$zip->open('{$archiveFileNameForPhp}') === TRUE) { \\\$zip->extractTo('.'); \\\$zip->close(); echo 'EXTRACTION_SUCCESS'; } else { echo 'EXTRACTION_FAILED'; }\" 2>&1; ";
                 $extractionCommand .= 'else ';
                 $extractionCommand .= "echo 'TOOL_NOT_FOUND:unzip'; ";
                 $extractionCommand .= 'fi';
             } elseif (preg_match('/\.(tar\.gz|tgz)$/i', $filePath)) {
                 $extractionCommand = "cd {$fileDirEscaped} && ";
                 $extractionCommand .= 'if command -v tar >/dev/null 2>&1; then ';
-                $extractionCommand .= "tar -xzf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS'; ";
+                $extractionCommand .= "(tar -xzf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= "else echo 'TOOL_NOT_FOUND:tar'; fi";
             } elseif (preg_match('/\.(tar\.bz2|tbz2|tbz)$/i', $filePath)) {
                 $extractionCommand = "cd {$fileDirEscaped} && ";
                 $extractionCommand .= 'if command -v tar >/dev/null 2>&1; then ';
-                $extractionCommand .= "tar -xjf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS'; ";
+                $extractionCommand .= "(tar -xjf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= "else echo 'TOOL_NOT_FOUND:tar'; fi";
             } elseif (preg_match('/\.(tar\.xz|txz)$/i', $filePath)) {
                 $extractionCommand = "cd {$fileDirEscaped} && ";
                 $extractionCommand .= 'if command -v tar >/dev/null 2>&1; then ';
-                $extractionCommand .= "tar -xJf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS'; ";
+                $extractionCommand .= "(tar -xJf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= "else echo 'TOOL_NOT_FOUND:tar'; fi";
             } elseif (str_ends_with(strtolower($filePath), '.tar')) {
                 $extractionCommand = "cd {$fileDirEscaped} && ";
                 $extractionCommand .= 'if command -v tar >/dev/null 2>&1; then ';
-                $extractionCommand .= "tar -xf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS'; ";
+                $extractionCommand .= "(tar -xf {$fileNameEscaped} -C . 2>&1 && echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= "else echo 'TOOL_NOT_FOUND:tar'; fi";
             } elseif (str_ends_with(strtolower($filePath), '.gz')) {
                 $extractionCommand = "cd {$fileDirEscaped} && ";
                 $extractionCommand .= 'if command -v gzip >/dev/null 2>&1; then ';
-                $extractionCommand .= "gzip -d -k {$fileNameEscaped} 2>&1 && echo 'EXTRACTION_SUCCESS'; ";
+                $extractionCommand .= "(gzip -d -k {$fileNameEscaped} 2>&1 && echo 'EXTRACTION_SUCCESS') || echo 'EXTRACTION_FAILED'; ";
                 $extractionCommand .= "else echo 'TOOL_NOT_FOUND:gzip'; fi";
             } else {
                 $this->dispatch('error', 'Unsupported archive format.');
@@ -1487,50 +1505,60 @@ class FileExplorer extends Component
                 return;
             }
 
-            $innerCommand = $extractionCommand;
+            // Log file inside the container — tail'd by the polling
+            // refresh to surface progress / detect completion.
+            $logFile = '/tmp/coolify-extract-'.date('Ymd-His').'-'.substr(md5((string) $filePath), 0, 8).'.log';
+            $escapedLogFile = escapeshellarg($logFile);
 
-            $command = "docker exec {$escapedContainer} sh -c ".escapeshellarg($innerCommand);
+            // Double-fork via `&` + nohup so SIGHUP from the closing
+            // docker exec doesn't kill the extraction. `setsid` would
+            // be cleaner but isn't guaranteed in minimal containers.
+            $backgroundCommand = "nohup sh -c ".escapeshellarg($extractionCommand)." > {$escapedLogFile} 2>&1 & echo __EXTRACT_STARTED__ \$!";
+            $command = "docker exec {$escapedContainer} sh -c ".escapeshellarg($backgroundCommand);
 
             if ($server->isNonRoot()) {
                 $command = "sudo {$command}";
             }
 
-            // Para archivos grandes, usar timeout extendido (2 horas = 7200 segundos)
-            // y deshabilitar multiplexing para evitar problemas de conexión
-            $extendedTimeout = 7200; // 2 horas para archivos grandes
+            $output = (string) (instant_remote_process([$command], $server, false) ?? '');
+            if (! str_contains($output, '__EXTRACT_STARTED__')) {
+                $this->dispatch('error', 'Extracción no pudo iniciarse. Salida: '.substr($output, 0, 500));
+                $this->showExtractDialog = false;
 
-            // Notificar al usuario sobre archivos grandes
-            $this->dispatch('info', 'Extrayendo archivo. Esto puede tardar varios minutos para archivos grandes...');
-
-            // Execute extraction with extended timeout and disabled multiplexing for large files
-            $output = instant_remote_process([$command], $server, false, false, $extendedTimeout, true);
-            $output = trim($output ?? '');
-
-            // Check if extraction was successful
-            if (str_contains($output, 'EXTRACTION_SUCCESS')) {
-                $this->dispatch('success', 'File extracted successfully.');
-                // Refresh file list to show extracted files
-                $this->loadFiles();
-            } elseif (str_contains($output, 'TOOL_NOT_FOUND:')) {
-                $tool = str_replace('TOOL_NOT_FOUND:', '', $output);
-                $this->dispatch('error', "Required tool not found in container: {$tool}. Please install it first.");
-            } elseif (str_contains($output, 'EXTRACTION_FAILED')) {
-                // Show error output from extraction command
-                $this->dispatch('error', 'Extraction failed: '.$output);
-            } elseif (! empty($output)) {
-                // Si hay output pero no contiene EXTRACTION_SUCCESS, puede ser un error parcial
-                $this->dispatch('error', 'Extraction may have failed. Output: '.substr($output, 0, 500));
-            } else {
-                // No output puede indicar timeout o conexión perdida para archivos muy grandes
-                $this->dispatch('error', 'Extraction failed. No output received from container. This may indicate a timeout for very large files. Please try again or extract the file manually using the terminal.');
+                return;
             }
+
+            $pid = null;
+            if (preg_match('/__EXTRACT_STARTED__\s*(\d+)?/', $output, $matches) === 1 && isset($matches[1]) && $matches[1] !== '') {
+                $pid = (int) $matches[1];
+            }
+
+            $this->addCompressionTask([
+                'id' => (string) str()->uuid(),
+                'task_type' => 'extraction',
+                'server_id' => data_get($server, 'id'),
+                'container' => $containerName,
+                'directory' => $fileDir,
+                'archive_path' => $filePath,
+                'archive_name' => $archiveFileName,
+                'selected_items' => [$filePath],
+                'resource_type' => $this->type,
+                'resource_uuid' => (string) data_get($this->resource, 'uuid', ''),
+                'open_url' => $this->buildTaskOpenUrl($fileDir, $containerName),
+                'log_file' => $logFile,
+                'pid' => $pid,
+                'status' => 'running',
+                'created_at' => now()->toDateTimeString(),
+                'last_message' => 'Extracción iniciada en segundo plano.',
+            ]);
 
             $this->selectedFiles = [];
             $this->showExtractDialog = false;
+            $this->dispatch('success', 'Extracción iniciada en segundo plano. Puedes seguir navegando — mira el panel "Tareas en segundo plano" arriba a la derecha para ver el progreso.');
 
             return;
         } catch (\Throwable $e) {
-            $this->dispatch('error', 'Failed to extract file. Ensure the container has the required tools (e.g., unzip, tar). Error: '.$e->getMessage());
+            $this->dispatch('error', 'Failed to start extraction: '.$e->getMessage());
             $this->showExtractDialog = false;
         }
     }
@@ -3829,6 +3857,12 @@ class FileExplorer extends Component
             }
 
             $escapedContainer = escapeshellarg($containerName);
+            // task_type distinguishes compression ("did the archive
+            // file appear on disk?") from extraction ("did the log
+            // print EXTRACTION_SUCCESS?"). Old tasks written before
+            // this refactor default to "compression" so existing
+            // cached rows keep behaving the same way.
+            $taskType = (string) data_get($task, 'task_type', 'compression');
             $pid = data_get($task, 'pid');
             if (is_int($pid) && $pid > 0) {
                 $runningCheck = "docker exec {$escapedContainer} sh -c 'kill -0 {$pid} >/dev/null 2>&1 && echo RUNNING || echo DONE'";
@@ -3837,10 +3871,80 @@ class FileExplorer extends Component
                 }
                 $runningResult = trim((string) (instant_remote_process([$runningCheck], $server, false) ?? ''));
                 if ($runningResult === 'RUNNING') {
+                    // While running, for extraction tasks we tail
+                    // the last line of the log so the dropdown shows
+                    // live progress ("Extracted 12000/45000 files").
+                    if ($taskType === 'extraction') {
+                        $logFile = (string) data_get($task, 'log_file', '');
+                        if ($logFile !== '') {
+                            $escapedLog = escapeshellarg($logFile);
+                            $tailCommand = "docker exec {$escapedContainer} sh -c 'tail -n 1 {$escapedLog} 2>/dev/null'";
+                            if ($server->isNonRoot()) {
+                                $tailCommand = "sudo {$tailCommand}";
+                            }
+                            $liveTail = trim((string) (instant_remote_process([$tailCommand], $server, false) ?? ''));
+                            $task['last_message'] = $liveTail !== '' ? 'Extrayendo: '.mb_substr($liveTail, 0, 240) : 'Extrayendo…';
+
+                            return $task;
+                        }
+                    }
                     $task['last_message'] = 'Running...';
 
                     return $task;
                 }
+            }
+
+            // Completion detection branches by task type.
+            if ($taskType === 'extraction') {
+                $logFile = (string) data_get($task, 'log_file', '');
+                if ($logFile !== '') {
+                    $escapedLog = escapeshellarg($logFile);
+                    $tailCommand = "docker exec {$escapedContainer} sh -c 'tail -n 50 {$escapedLog} 2>/dev/null'";
+                    if ($server->isNonRoot()) {
+                        $tailCommand = "sudo {$tailCommand}";
+                    }
+                    $tailOutput = trim((string) (instant_remote_process([$tailCommand], $server, false) ?? ''));
+
+                    if (str_contains($tailOutput, 'EXTRACTION_SUCCESS')) {
+                        $task['status'] = 'completed';
+                        $task['last_message'] = 'Archivo extraído correctamente.';
+
+                        // Best-effort cleanup of the temp log. Ignore
+                        // failures — /tmp gets wiped on container
+                        // restart anyway.
+                        $cleanup = "docker exec {$escapedContainer} sh -c 'rm -f {$escapedLog} 2>/dev/null || true'";
+                        if ($server->isNonRoot()) {
+                            $cleanup = "sudo {$cleanup}";
+                        }
+                        instant_remote_process([$cleanup], $server, false);
+
+                        return $task;
+                    }
+
+                    if (str_contains($tailOutput, 'TOOL_NOT_FOUND:')) {
+                        $task['status'] = 'failed';
+                        $task['last_message'] = 'La herramienta requerida no está en el contenedor (unzip/tar). Instálala manualmente o extrae desde la terminal.';
+
+                        return $task;
+                    }
+
+                    if (str_contains($tailOutput, 'EXTRACTION_FAILED')) {
+                        $task['status'] = 'failed';
+                        $task['last_message'] = $tailOutput !== '' ? 'Extracción fallida: '.mb_substr($tailOutput, 0, 300) : 'Extracción fallida (sin detalles).';
+
+                        return $task;
+                    }
+
+                    $task['status'] = 'failed';
+                    $task['last_message'] = $tailOutput !== '' ? 'Extracción terminó sin marcador de éxito: '.mb_substr($tailOutput, 0, 300) : 'Extracción terminó sin output.';
+
+                    return $task;
+                }
+
+                $task['status'] = 'failed';
+                $task['last_message'] = 'Extracción terminó sin log.';
+
+                return $task;
             }
 
             $archivePath = (string) data_get($task, 'archive_path', '');

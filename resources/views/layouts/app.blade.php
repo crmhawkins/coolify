@@ -150,10 +150,15 @@
                                     class="rounded-lg border shadow-2xl"
                                     style="position:absolute;right:0;top:calc(100% + 0.5rem);width:30rem;max-width:calc(100vw - 2rem);max-height:32rem;overflow:auto;background-color:#18181b;border-color:#27272a;color:#e4e4e7;"
                                 >
-                                    {{-- Header --}}
+                                    {{-- Header — renamed from "Tareas de
+                                         compresión" to "Tareas en segundo
+                                         plano" because this panel now
+                                         tracks both compressions AND
+                                         extractions (background-extraction
+                                         work, April 2026). --}}
                                     <div class="flex items-center justify-between gap-2 border-b px-4 py-3" style="border-color:#27272a;">
                                         <div class="min-w-0">
-                                            <h4 class="text-sm font-semibold" style="color:#ffffff;">Tareas de compresión</h4>
+                                            <h4 class="text-sm font-semibold" style="color:#ffffff;">Tareas en segundo plano</h4>
                                             <p class="mt-0.5 text-[11px]" style="color:#71717a;">
                                                 <span x-show="runningCount > 0" x-cloak><span x-text="runningCount"></span> en curso · </span>
                                                 <span x-show="completedCount > 0" x-cloak><span x-text="completedCount"></span> completadas · </span>
@@ -199,8 +204,8 @@
                                             <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="width:40px;height:40px;margin-bottom:0.5rem;color:#3f3f46;display:block;">
                                                 <path stroke-linecap="round" stroke-linejoin="round" d="M21 8v13H3V8M1 3h22v5H1zM10 12h4" />
                                             </svg>
-                                            <p class="text-sm" style="color:#a1a1aa;">No hay tareas de compresión</p>
-                                            <p class="mt-0.5 text-[11px]" style="color:#52525b;">Las tareas aparecen aquí cuando comprimes ficheros desde el explorador</p>
+                                            <p class="text-sm" style="color:#a1a1aa;">No hay tareas en segundo plano</p>
+                                            <p class="mt-0.5 text-[11px]" style="color:#52525b;">Las tareas aparecen aquí cuando comprimes o extraes ficheros desde el explorador</p>
                                         </div>
                                     </template>
 
@@ -222,6 +227,14 @@
                                                         <div style="min-width:0;flex:1 1 0%;">
                                                             <div style="display:flex;align-items:center;gap:0.5rem;">
                                                                 <span style="flex-shrink:0;display:inline-flex;" x-html="taskIcon(task)"></span>
+                                                                {{-- Kind pill: "COMPRIMIR" / "EXTRAER"
+                                                                     so users can tell a compression task
+                                                                     apart from an extraction one at a
+                                                                     glance. Same row already had a
+                                                                     status pill (RUNNING/COMPLETED/
+                                                                     FAILED) on the right — this one is
+                                                                     an identity tag. --}}
+                                                                <span :style="taskKindPillStyle(task)" x-text="taskKindLabel(task)"></span>
                                                                 <p style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.875rem;font-weight:600;color:#ffffff;" x-text="task.archive_name || 'archive.zip'"></p>
                                                             </div>
                                                             <p style="margin:0.25rem 0 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.6875rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#71717a;" x-text="'📁 ' + (task.directory || '/')"></p>
@@ -334,16 +347,16 @@
                                     // readable at a glance: "N ⇣" when tasks are
                                     // running, "Compression Tasks" when empty.
                                     buttonLabel() {
-                                        if (this.tasks.length === 0) return 'Compresiones';
+                                        if (this.tasks.length === 0) return 'Tareas';
                                         const running = this.runningCount;
                                         if (running > 0) return `${running} en curso · ${this.tasks.length} totales`;
                                         return `${this.tasks.length} ${this.tasks.length === 1 ? 'tarea' : 'tareas'}`;
                                     },
                                     buttonTitle() {
-                                        if (this.runningCount > 0) return `Hay ${this.runningCount} compresión(es) en curso. Haz clic para ver detalles.`;
-                                        if (this.failedCount > 0) return `Hay ${this.failedCount} compresión(es) fallidas. Haz clic para revisar.`;
+                                        if (this.runningCount > 0) return `Hay ${this.runningCount} tarea(s) en curso. Haz clic para ver detalles.`;
+                                        if (this.failedCount > 0) return `Hay ${this.failedCount} tarea(s) fallidas. Haz clic para revisar.`;
                                         if (this.completedCount > 0) return `${this.completedCount} completadas. Haz clic para gestionarlas.`;
-                                        return 'Tareas de compresión en segundo plano';
+                                        return 'Tareas en segundo plano (compresión / extracción)';
                                     },
                                     // Inline style for the trigger button. We
                                     // deliberately avoid Tailwind utility
@@ -396,6 +409,24 @@
                                         if (s === 'failed') return common + 'background-color:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3);';
                                         if (s === 'completed') return common + 'background-color:rgba(34,197,94,0.15);color:#4ade80;border-color:rgba(34,197,94,0.3);';
                                         return common + 'background-color:rgba(245,158,11,0.15);color:#fbbf24;border-color:rgba(245,158,11,0.3);';
+                                    },
+                                    // Small colored pill that identifies
+                                    // whether the row is a compression or
+                                    // an extraction task. Older cached rows
+                                    // don't have a task_type field — they
+                                    // default to "compression" so nothing
+                                    // breaks during the transition window.
+                                    taskKindPillStyle(task) {
+                                        const common = 'flex-shrink:0;display:inline-block;border-radius:0.25rem;padding:0.0625rem 0.375rem;font-size:0.5625rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;text-transform:uppercase;border-width:1px;border-style:solid;letter-spacing:0.05em;';
+                                        const kind = task?.task_type || 'compression';
+                                        if (kind === 'extraction') {
+                                            return common + 'background-color:rgba(59,130,246,0.15);color:#60a5fa;border-color:rgba(59,130,246,0.35);';
+                                        }
+                                        return common + 'background-color:rgba(139,92,246,0.15);color:#c4b5fd;border-color:rgba(139,92,246,0.35);';
+                                    },
+                                    taskKindLabel(task) {
+                                        const kind = task?.task_type || 'compression';
+                                        return kind === 'extraction' ? 'EXTRAER' : 'COMPRIMIR';
                                     },
                                     taskIcon(task) {
                                         // Inline width/height + style because the
