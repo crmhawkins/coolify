@@ -329,6 +329,30 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/servers', ServerIndex::class)->name('server.index')->middleware('restrict.client');
     // Route::get('/server/new', ServerCreate::class)->name('server.create');
 
+    // Team-wide "Backups" feature: one sidebar entry under Servers,
+    // gated to non-client users via restrict.client middleware.
+    // Download route streams the tarball for a completed local run.
+    Route::get('/backups', \App\Livewire\Backups\Index::class)
+        ->name('backups.index')
+        ->middleware('restrict.client');
+    Route::get('/backups/download/{id}', function (int $id) {
+        if (auth()->user()?->isClient()) {
+            abort(403, 'Los clientes no pueden descargar backups globales.');
+        }
+        $teamId = (int) (currentTeam()?->id ?? 0);
+        $run = \App\Models\TeamBackupRun::where('id', $id)
+            ->where('team_id', $teamId)
+            ->where('destination', 'local')
+            ->where('status', 'completed')
+            ->firstOrFail();
+        $path = (string) $run->artifact_path;
+        if ($path === '' || ! is_file($path)) {
+            abort(404, 'El archivo de backup ya no existe en disco.');
+        }
+
+        return response()->download($path, basename($path));
+    })->name('backups.download')->middleware('restrict.client');
+
     Route::prefix('server/{server_uuid}')->middleware('restrict.client')->group(function () {
         Route::get('/', ServerShow::class)->name('server.show');
         Route::get('/advanced', ServerAdvanced::class)->name('server.advanced');

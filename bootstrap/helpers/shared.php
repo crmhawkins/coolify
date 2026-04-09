@@ -80,6 +80,58 @@ function backup_dir(): string
 {
     return base_configuration_dir().'/backups';
 }
+/**
+ * Directory used by the new team-wide "Backups" sidebar feature.
+ * Kept as a sibling of Coolify's own database backups so the two
+ * buckets don't stomp on each other's retention policies.
+ */
+function custom_backup_dir(): string
+{
+    return backup_dir().'/custom';
+}
+/**
+ * Free disk space (in bytes) at the given path ON THE COOLIFY HOST.
+ * Returns null on failure so the caller can render a friendly
+ * "couldn't read disk usage" hint instead of crashing the UI.
+ *
+ * This is a local-only helper — for remote servers use the server
+ * exec path and `df -B1` directly, same command, just over SSH.
+ */
+function coolify_host_free_bytes(string $path = '/'): ?int
+{
+    $bytes = @disk_free_space($path);
+
+    return $bytes === false ? null : (int) $bytes;
+}
+/**
+ * Total size of a directory ON THE COOLIFY HOST, walked recursively.
+ * Slow for huge trees (millions of files) but the custom backup
+ * feature only ever walks a handful of volume dirs, so the cost is
+ * bounded. Returns 0 for missing dirs so the "estimated size" box
+ * doesn't have to special-case that.
+ */
+function coolify_host_dir_size_bytes(string $path): int
+{
+    if (! is_dir($path)) {
+        return 0;
+    }
+    $total = 0;
+    try {
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($it as $file) {
+            if ($file->isFile()) {
+                $total += $file->getSize();
+            }
+        }
+    } catch (\Throwable $e) {
+        return $total;
+    }
+
+    return $total;
+}
 function metrics_dir(): string
 {
     return base_configuration_dir().'/metrics';

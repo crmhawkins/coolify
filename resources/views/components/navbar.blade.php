@@ -164,6 +164,29 @@
                         </a>
                     </li>
 
+                    {{-- Team-wide Backups feature. Shows up right
+                         below Servers per the feature owner's
+                         request. Gated on the route side to
+                         non-client users; the sidebar entry itself
+                         sits inside the same `! isClient()` block
+                         as Servers does. --}}
+                    <li>
+                        <a title="Backups" {{ wireNavigate() }}
+                            class="{{ request()->is('backups*') ? 'menu-item menu-item-active' : 'menu-item' }}"
+                            href="{{ route('backups.index') }}">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="menu-item-icon" viewBox="0 0 24 24"
+                                stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round"
+                                stroke-linejoin="round">
+                                <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+                                <path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0" />
+                                <path d="M9 12l2 2l4 -4" />
+                                <path d="M3 12h2" />
+                                <path d="M19 12h2" />
+                            </svg>
+                            <span class="menu-item-label">Backups</span>
+                        </a>
+                    </li>
+
                     <li>
                         <a title="Sources" {{ wireNavigate() }}
                             class="{{ request()->is('source*') ? 'menu-item-active menu-item' : 'menu-item' }}"

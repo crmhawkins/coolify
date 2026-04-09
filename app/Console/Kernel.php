@@ -7,6 +7,7 @@ use App\Jobs\CheckHelperImageJob;
 use App\Jobs\CheckTraefikVersionJob;
 use App\Jobs\CleanupInstanceStuffsJob;
 use App\Jobs\CleanupOrphanedPreviewContainersJob;
+use App\Jobs\DispatchTeamBackupsJob;
 use App\Jobs\PullChangelog;
 use App\Jobs\PullTemplatesFromCDN;
 use App\Jobs\RegenerateSslCertJob;
@@ -54,6 +55,11 @@ class Kernel extends ConsoleKernel
             // Scheduled Jobs (Backups & Tasks)
             $this->scheduleInstance->job(new ScheduledJobManager)->everyMinute()->onOneServer();
 
+            // Team-wide "Backups" feature dispatcher (checks crons
+            // every minute, fires RunTeamBackupJob when a team's
+            // schedule is due).
+            $this->scheduleInstance->job(new DispatchTeamBackupsJob)->everyMinute()->onOneServer();
+
             $this->scheduleInstance->command('uploads:clear')->everyTwoMinutes();
 
         } else {
@@ -74,6 +80,9 @@ class Kernel extends ConsoleKernel
 
             // Scheduled Jobs (Backups & Tasks)
             $this->scheduleInstance->job(new ScheduledJobManager)->everyMinute()->onOneServer();
+
+            // Team-wide "Backups" feature dispatcher.
+            $this->scheduleInstance->job(new DispatchTeamBackupsJob)->everyMinute()->onOneServer();
 
             $this->scheduleInstance->job(new RegenerateSslCertJob)->twiceDaily();
 
