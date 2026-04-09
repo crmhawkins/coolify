@@ -233,17 +233,19 @@
                                     Cargando configuración PHP…
                                 </div>
                             @elseif (!empty($phpIniSettings))
-                                {{-- Editable grid. Every key mapped in
-                                     LaravelManager::PHP_INI_EDITABLE_KEYS
-                                     gets its own input bound to
-                                     $phpIniEditableValues. Label on top,
-                                     input below; descriptions on hover. --}}
+                                {{-- Editable grid. Each input is bound
+                                     by POSITION inside PHP_INI_EDITABLE_KEYS
+                                     — see the comment on the property for
+                                     why we can't use the ini key as the
+                                     wire:model path (Livewire treats dots
+                                     as nested array access and breaks
+                                     `opcache.memory_consumption`). --}}
                                 @php
                                     $phpIniDescriptions = [
                                         'upload_max_filesize' => 'Tamaño máximo de un archivo subido (ej: 100M)',
                                         'post_max_size' => 'Tamaño máximo de un POST (debe ser ≥ upload_max_filesize)',
                                         'max_execution_time' => 'Tiempo máximo en segundos para un script (0 = sin límite)',
-                                        'max_input_time' => 'Tiempo máximo en segundos para parsear la request',
+                                        'max_input_time' => 'Tiempo máximo en segundos para parsear la request (-1 = sin límite)',
                                         'memory_limit' => 'Memoria máxima que puede usar un script (ej: 512M)',
                                         'max_input_vars' => 'Número máximo de variables de entrada en una request',
                                         'max_file_uploads' => 'Número máximo de archivos en una sola subida',
@@ -253,31 +255,44 @@
                                         'realpath_cache_size' => 'Tamaño del cache de resolución de rutas (ej: 4096K)',
                                         'realpath_cache_ttl' => 'TTL en segundos del cache de rutas',
                                     ];
+                                    $editableKeys = \App\Livewire\Project\Service\LaravelManager::PHP_INI_EDITABLE_KEYS;
                                 @endphp
-                                <div class="grid gap-3 md:grid-cols-2">
-                                    @foreach (\App\Livewire\Project\Service\LaravelManager::PHP_INI_EDITABLE_KEYS as $setting)
+                                <div class="grid gap-4 md:grid-cols-2">
+                                    @foreach ($editableKeys as $idx => $setting)
                                         <div
-                                            class="rounded px-3 py-2.5"
-                                            style="background-color:#0a0a0a;border:1px solid #27272a;"
+                                            class="rounded-md px-5 py-4 transition-colors"
+                                            style="background-color:#101013;border:1px solid #27272a;"
+                                            onmouseover="this.style.borderColor='#3f3f46'"
+                                            onmouseout="this.style.borderColor='#27272a'"
                                         >
                                             <label
-                                                for="php_ini_{{ $setting }}"
-                                                class="block text-xs font-mono mb-1 truncate"
+                                                for="php_ini_{{ $idx }}"
+                                                class="flex items-center gap-1.5 text-xs font-mono mb-2.5 truncate"
                                                 style="color:#a1a1aa;"
                                                 title="{{ $phpIniDescriptions[$setting] ?? $setting }}"
                                             >
-                                                {{ $setting }}
+                                                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#71717a;">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                                </svg>
+                                                <span class="truncate">{{ $setting }}</span>
                                             </label>
                                             <input
-                                                id="php_ini_{{ $setting }}"
+                                                id="php_ini_{{ $idx }}"
                                                 type="text"
-                                                wire:model="phpIniEditableValues.{{ $setting }}"
-                                                class="w-full rounded px-2 py-1 text-sm font-mono font-semibold"
+                                                wire:model="phpIniEditableValues.{{ $idx }}"
+                                                class="w-full rounded-md px-3 py-2 text-sm font-mono font-semibold transition-colors focus:outline-none"
                                                 style="background-color:#18181b;color:#c4b5fd;border:1px solid #3f3f46;"
+                                                onfocus="this.style.borderColor='#8b5cf6';this.style.boxShadow='0 0 0 2px rgba(139,92,246,0.2)'"
+                                                onblur="this.style.borderColor='#3f3f46';this.style.boxShadow='none'"
                                                 placeholder="{{ $phpIniSettings[$setting] ?? '' }}"
                                                 spellcheck="false"
                                                 autocomplete="off"
                                             />
+                                            @if (! empty($phpIniDescriptions[$setting]))
+                                                <p class="mt-1.5 text-[11px] leading-snug" style="color:#71717a;">
+                                                    {{ $phpIniDescriptions[$setting] }}
+                                                </p>
+                                            @endif
                                         </div>
                                     @endforeach
                                 </div>
