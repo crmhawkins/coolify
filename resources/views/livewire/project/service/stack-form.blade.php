@@ -14,22 +14,6 @@
                 @if ($this->isLaravelRootkitStack())
                     <x-forms.button
                         type="button"
-                        wire:click="rebuildFrontendAssets"
-                        wire:loading.attr="disabled"
-                        wire:target="rebuildFrontendAssets"
-                    >
-                        Rebuild CSS/JS
-                    </x-forms.button>
-                    <x-forms.button
-                        type="button"
-                        wire:click="verifyFrontendAssets"
-                        wire:loading.attr="disabled"
-                        wire:target="verifyFrontendAssets"
-                    >
-                        Verificar Assets
-                    </x-forms.button>
-                    <x-forms.button
-                        type="button"
                         wire:click="deployLaravelChanges"
                         wire:loading.attr="disabled"
                         wire:target="deployLaravelChanges"

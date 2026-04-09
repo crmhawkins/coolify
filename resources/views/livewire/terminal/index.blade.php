@@ -23,8 +23,9 @@
                                 <option value="{{ $server->uuid }}">{{ $server->name }}</option>
                                 @foreach ($containers as $container)
                                     @if ($container['server_uuid'] == $server->uuid)
-                                        <option value="{{ $container['uuid'] }}">
-                                            {{ $server->name }} -> {{ $container['name'] }}
+                                        <option value="{{ $container['uuid'] }}"
+                                            title="{{ $container['name'] }}">
+                                            {{ $server->name }} → {{ $container['display_name'] ?? $container['name'] }}
                                         </option>
                                     @endif
                                 @endforeach
