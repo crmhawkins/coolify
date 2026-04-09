@@ -206,7 +206,12 @@ class StackForm extends Component
         }
 
         $this->setFieldValueIfPresent('SERVICE_URL_LARAVEL', '');
-        $this->loadGithubBranches();
+        // Refresh the branch list silently on mount so the dropdown is
+        // populated on page load, without firing a "Ramas detectadas"
+        // toast every time the user opens the service or presses F5.
+        // The toast only fires when the user clicks the "Detectar ramas"
+        // button manually (see wire:click in stack-form.blade.php).
+        $this->loadGithubBranches(notify: false);
     }
 
     public function isLaravelGitHubStack(): bool
@@ -234,7 +239,12 @@ class StackForm extends Component
 
     public function saveGithubRepoUrl(): void
     {
-        $this->loadGithubBranches();
+        // Silent branch refresh — this method already fires its own
+        // "GitHub repository URL saved" toast below, so surfacing a
+        // second "Ramas detectadas" toast at the same time is just
+        // noise. The user can click "Detectar ramas" if they want
+        // explicit confirmation.
+        $this->loadGithubBranches(notify: false);
         $this->submit(notify: false);
         $this->dispatch('success', 'GitHub repository URL saved.');
     }
@@ -266,7 +276,17 @@ class StackForm extends Component
         $this->dispatch('success', 'GitHub token saved.');
     }
 
-    public function loadGithubBranches(): void
+    /**
+     * Refresh the GitHub branch dropdown. By default fires a success
+     * toast when branches are found and a warning toast when they
+     * can't be detected — but callers that run on every page mount
+     * (mount(), saveGithubRepoUrl()) pass notify: false to avoid
+     * spamming the user with "Ramas detectadas" on every F5.
+     * The manual "Detectar ramas" button leaves notify at its
+     * default (true) so the user still gets feedback when they
+     * explicitly ask for detection.
+     */
+    public function loadGithubBranches(bool $notify = true): void
     {
         if (! $this->isLaravelRootkitStack()) {
             return;
@@ -321,7 +341,9 @@ class StackForm extends Component
 
         if ($branches === []) {
             $this->githubBranches = [];
-            $this->dispatch('warning', 'No se pudieron detectar ramas. Revisa URL, permisos o rate limit de GitHub.');
+            if ($notify) {
+                $this->dispatch('warning', 'No se pudieron detectar ramas. Revisa URL, permisos o rate limit de GitHub.');
+            }
 
             return;
         }
@@ -350,7 +372,9 @@ class StackForm extends Component
         if (! in_array($selectedBranch, $this->githubBranches, true)) {
             $this->setFieldValueIfPresent('SERVICE_GITHUB_BRANCH', $this->githubBranches[0]);
         }
-        $this->dispatch('success', 'Ramas detectadas correctamente.');
+        if ($notify) {
+            $this->dispatch('success', 'Ramas detectadas correctamente.');
+        }
     }
 
     public function saveServiceUrl(): void
