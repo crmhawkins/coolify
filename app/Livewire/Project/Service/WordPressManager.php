@@ -399,18 +399,43 @@ $cfg = @file_get_contents('/var/www/html/wp-config.php');
 if ($cfg === false) {
     out(['ok' => false, 'message' => 'wp-config.php not readable']);
 }
-function extract_define(string $content, string $name): ?string {
+
+/**
+ * Same multi-strategy DB constant resolver as buildUpdatePrefixPhpScript().
+ * Kept inline (duplicated across both scripts) because each script
+ * runs as a standalone file inside the container — there is no
+ * shared include path we can depend on, and both scripts are small
+ * enough that the duplication is cheaper than setting up a shared
+ * module round-trip.
+ */
+function resolve_db_var(string $content, string $name): ?string {
+    $envName = 'WORDPRESS_' . $name;
+    $fromEnv = getenv($envName);
+    if ($fromEnv === false || $fromEnv === '') {
+        $fromEnv = $_ENV[$envName] ?? $_SERVER[$envName] ?? null;
+    }
+    if (is_string($fromEnv) && $fromEnv !== '') {
+        return $fromEnv;
+    }
     if (preg_match('/define\s*\(\s*[\'"]' . preg_quote($name, '/') . '[\'"]\s*,\s*([\'"])(.*?)\1\s*\)/s', $content, $m)) {
         return $m[2];
     }
     return null;
 }
-$dbName = extract_define($cfg, 'DB_NAME');
-$dbUser = extract_define($cfg, 'DB_USER');
-$dbPass = extract_define($cfg, 'DB_PASSWORD');
-$dbHost = extract_define($cfg, 'DB_HOST') ?? 'localhost';
-if ($dbName === null || $dbUser === null || $dbPass === null) {
-    out(['ok' => false, 'message' => 'Could not read DB credentials from wp-config.php.']);
+
+$dbName = resolve_db_var($cfg, 'DB_NAME');
+$dbUser = resolve_db_var($cfg, 'DB_USER');
+$dbPass = resolve_db_var($cfg, 'DB_PASSWORD');
+$dbHost = resolve_db_var($cfg, 'DB_HOST') ?? 'localhost';
+$missing = [];
+if ($dbName === null) { $missing[] = 'DB_NAME'; }
+if ($dbUser === null) { $missing[] = 'DB_USER'; }
+if ($dbPass === null) { $missing[] = 'DB_PASSWORD'; }
+if (!empty($missing)) {
+    out([
+        'ok' => false,
+        'message' => 'Could not resolve DB credentials (' . implode(', ', $missing) . '). Tried env vars WORDPRESS_DB_* and literal define() in wp-config.php.',
+    ]);
 }
 
 $mysqli = @new mysqli($dbHost, $dbUser, $dbPass, $dbName);
@@ -861,9 +886,16 @@ PHP;
 <?php
 // Runs inside the WordPress container. We intentionally do NOT load
 // wp-load.php because it requires a fully healthy WordPress state
-// and a specific prefix that may already be inconsistent. Instead we
-// pull the 4 DB constants directly out of wp-config.php with a
-// targeted regex.
+// and a specific prefix that may already be inconsistent. Instead
+// we resolve the 4 DB constants using the same pipeline the
+// official WordPress Docker image uses itself:
+//   1. If the container has the WORDPRESS_DB_* env vars set
+//      (standard for the wordpress:latest image), use them directly.
+//   2. Otherwise, scrape wp-config.php for literal define('NAME', 'value')
+//      assignments — covers custom / legacy installs that hard-code
+//      credentials.
+// We never try to eval() the PHP because that would pull in WP core
+// and fail when the prefix is inconsistent.
 error_reporting(E_ERROR | E_PARSE);
 function out($payload) { echo json_encode($payload); exit; }
 
@@ -878,20 +910,56 @@ if ($cfg === false) {
     out(['ok' => false, 'message' => 'wp-config.php not readable']);
 }
 
-function extract_define(string $content, string $name): ?string {
-    // Matches define('NAME', 'value'); with either quote style.
+/**
+ * Resolves a WordPress DB constant using a multi-strategy pipeline
+ * so it works with both the official image (env-var driven) and
+ * custom installs (literal defines in wp-config.php).
+ *
+ * Strategy order:
+ *   1. Env var WORDPRESS_<NAME> (getenv, $_ENV, $_SERVER)
+ *      This is what the official wordpress:latest image populates
+ *      via its docker-entrypoint.sh before starting apache/php-fpm.
+ *   2. Regex scrape for define('NAME', 'value') with a string literal.
+ *      Covers custom installs that hard-code the credentials.
+ *   3. Return null so the caller can report precisely which constant
+ *      is missing.
+ */
+function resolve_db_var(string $content, string $name): ?string {
+    // Strategy 1: env var. The official image exports WORDPRESS_DB_HOST,
+    // WORDPRESS_DB_NAME, WORDPRESS_DB_USER, WORDPRESS_DB_PASSWORD and
+    // its wp-config.php reads them via getenv_docker(). Our PHP script
+    // runs inside the SAME container so we see the same env vars.
+    $envName = 'WORDPRESS_' . $name;
+    $fromEnv = getenv($envName);
+    if ($fromEnv === false || $fromEnv === '') {
+        $fromEnv = $_ENV[$envName] ?? $_SERVER[$envName] ?? null;
+    }
+    if (is_string($fromEnv) && $fromEnv !== '') {
+        return $fromEnv;
+    }
+
+    // Strategy 2: literal define(). Handles both quote styles and any
+    // amount of whitespace around the tokens.
     if (preg_match('/define\s*\(\s*[\'"]' . preg_quote($name, '/') . '[\'"]\s*,\s*([\'"])(.*?)\1\s*\)/s', $content, $m)) {
         return $m[2];
     }
+
     return null;
 }
 
-$dbName = extract_define($cfg, 'DB_NAME');
-$dbUser = extract_define($cfg, 'DB_USER');
-$dbPass = extract_define($cfg, 'DB_PASSWORD');
-$dbHost = extract_define($cfg, 'DB_HOST') ?? 'localhost';
-if ($dbName === null || $dbUser === null || $dbPass === null) {
-    out(['ok' => false, 'message' => 'Could not read DB credentials from wp-config.php.']);
+$dbName = resolve_db_var($cfg, 'DB_NAME');
+$dbUser = resolve_db_var($cfg, 'DB_USER');
+$dbPass = resolve_db_var($cfg, 'DB_PASSWORD');
+$dbHost = resolve_db_var($cfg, 'DB_HOST') ?? 'localhost';
+$missing = [];
+if ($dbName === null) { $missing[] = 'DB_NAME'; }
+if ($dbUser === null) { $missing[] = 'DB_USER'; }
+if ($dbPass === null) { $missing[] = 'DB_PASSWORD'; }
+if (!empty($missing)) {
+    out([
+        'ok' => false,
+        'message' => 'Could not resolve DB credentials (' . implode(', ', $missing) . '). Tried env vars WORDPRESS_DB_* and literal define() in wp-config.php.',
+    ]);
 }
 
 $mysqli = @new mysqli($dbHost, $dbUser, $dbPass, $dbName);

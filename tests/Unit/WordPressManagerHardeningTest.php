@@ -198,6 +198,34 @@ it('updateWpPrefix handles the "tables already have the new prefix" no-op case',
         ->toContain('Tables already use the new prefix');
 });
 
+it('DB credential resolver uses env vars first, then literal defines, then null', function () {
+    // The official wordpress:latest Docker image uses getenv_docker()
+    // calls in wp-config.php instead of literal strings. Our helper
+    // scripts must resolve WORDPRESS_DB_* env vars first (which the
+    // container has) and fall back to the literal define() regex
+    // only for custom installs that hard-code credentials.
+    $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/WordPressManager.php');
+
+    expect($source)
+        // The resolver function exists and is called in BOTH scripts.
+        ->toContain('function resolve_db_var')
+        // Strategy 1: env vars
+        ->toContain("\$envName = 'WORDPRESS_' . \$name;")
+        ->toContain('getenv($envName)')
+        ->toContain('$_ENV[$envName]')
+        ->toContain('$_SERVER[$envName]')
+        // Strategy 2: literal define regex
+        ->toContain("preg_match('/define\\s*\\(")
+        // Better error message listing missing constants.
+        ->toContain('Could not resolve DB credentials')
+        ->toContain('WORDPRESS_DB_*');
+
+    // Both scripts must call resolve_db_var — not the old
+    // extract_define name.
+    expect(substr_count($source, "function resolve_db_var"))->toBe(2);
+    expect(substr_count($source, 'extract_define'))->toBe(0);
+});
+
 /* -----------------------------------------------------------------
  | Blade: sub-menu + permissions card
  | ----------------------------------------------------------------- */
