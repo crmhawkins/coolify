@@ -6,6 +6,7 @@ use App\Enums\ProxyTypes;
 use App\Models\Server;
 use App\Models\Service;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Lorisleiva\Actions\Concerns\AsAction;
 
 /**
@@ -183,22 +184,46 @@ class RegenerateSslForService
             } else {
                 $newContent = (string) $pruned['content'];
 
-                // 5. Write the pruned JSON back via base64 round-trip
-                //    so we never have to worry about quoting. We
-                //    write to a .tmp path first and then mv so
-                //    Traefik never reads a half-written file (it
-                //    polls acme.json periodically). chmod 0600 is
-                //    Traefik's required permission.
-                $tmpPath = $acmePath.'.coolify-tmp';
-                $b64 = escapeshellarg(base64_encode($newContent));
-                $tmpArg = escapeshellarg($tmpPath);
-                $acmeArg = escapeshellarg($acmePath);
+                // 5. Write the pruned JSON back via SCP.
+                //
+                //    The previous version tried to ship the content
+                //    through `echo BASE64 | base64 -d > file` as a
+                //    single SSH command, which blew up on real
+                //    Coolify servers with
+                //      "Argument exceeds the allowed length of
+                //       131072 bytes"
+                //    because Linux ARG_MAX caps a single shell
+                //    argument at 128 KB, and the base64 of a typical
+                //    acme.json (several certs at ~8 KB each) easily
+                //    lands in the 150-300 KB range once encoded.
+                //
+                //    SCP is the right tool for this: no ARG_MAX
+                //    limit, same code path the rest of Coolify uses
+                //    for uploading config files. We stage the new
+                //    content under storage/app/temp/, SCP it to a
+                //    .coolify-tmp neighbour of acme.json on the
+                //    remote host, then chmod+mv atomically so
+                //    Traefik never reads a half-written file.
+                $tmpFilename = 'temp/'.uniqid('coolify-acme-', true).'.json';
+                Storage::disk('local')->put($tmpFilename, $newContent);
+                $localTmpPath = Storage::disk('local')->path($tmpFilename);
 
-                $writeCmd = "echo {$b64} | base64 -d > {$tmpArg} && chmod 600 {$tmpArg} && mv {$tmpArg} {$acmeArg}";
-                if ($server->isNonRoot()) {
-                    $writeCmd = "sudo sh -c ".escapeshellarg($writeCmd);
+                $remoteTmpPath = $acmePath.'.coolify-tmp';
+                try {
+                    instant_scp($localTmpPath, $remoteTmpPath, $server);
+
+                    // chmod 600 is Traefik's required permission on
+                    // acme.json, then atomic rename over the target.
+                    $tmpArg = escapeshellarg($remoteTmpPath);
+                    $acmeArg = escapeshellarg($acmePath);
+                    $finalizeCmd = "chmod 600 {$tmpArg} && mv {$tmpArg} {$acmeArg}";
+                    if ($server->isNonRoot()) {
+                        $finalizeCmd = "sudo sh -c ".escapeshellarg($finalizeCmd);
+                    }
+                    instant_remote_process([$finalizeCmd], $server, false);
+                } finally {
+                    Storage::disk('local')->delete($tmpFilename);
                 }
-                instant_remote_process([$writeCmd], $server, false);
             }
 
             // 6. SIGHUP the proxy so Traefik picks up the new
