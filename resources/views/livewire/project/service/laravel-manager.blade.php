@@ -232,6 +232,31 @@
                                     </svg>
                                     Cargando configuración PHP…
                                 </div>
+                            @elseif ($selectedContainerType === 'nginx')
+                                {{-- nginx containers run only the web server —
+                                     no PHP interpreter, so the ini editor has
+                                     nothing to edit here. We still keep the
+                                     container selector visible above so the
+                                     user can switch to another container
+                                     without navigating away. --}}
+                                <div
+                                    class="rounded-md px-5 py-6 flex items-start gap-3"
+                                    style="background-color:#101013;border:1px dashed #3f3f46;color:#a1a1aa;"
+                                >
+                                    <svg class="w-6 h-6 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color:#86efac;">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                                    </svg>
+                                    <div class="min-w-0">
+                                        <div class="text-sm font-semibold mb-1" style="color:#ffffff;">No hace falta tocar nada aquí</div>
+                                        <p class="text-xs leading-relaxed">
+                                            Este contenedor es un <span class="font-mono" style="color:#c4b5fd;">nginx</span>
+                                            y no ejecuta PHP, así que no tiene valores de <span class="font-mono">php.ini</span> que ajustar.
+                                            Si quieres editar la configuración PHP, selecciona arriba el contenedor
+                                            <span class="font-mono" style="color:#c4b5fd;">laravel</span> o
+                                            <span class="font-mono" style="color:#c4b5fd;">phpmyadmin</span>.
+                                        </p>
+                                    </div>
+                                </div>
                             @elseif (!empty($phpIniSettings))
                                 {{-- Editable grid. Each input is bound
                                      by POSITION inside PHP_INI_EDITABLE_KEYS
@@ -321,16 +346,22 @@
                                         <span wire:loading.remove wire:target="savePhpIniSettings">Guardar cambios</span>
                                         <span wire:loading wire:target="savePhpIniSettings">Guardando…</span>
                                     </button>
+                                    @php
+                                        $defaultsLabel = match ($selectedContainerType) {
+                                            'phpmyadmin' => 'phpMyAdmin',
+                                            default => 'Laravel Rootkit',
+                                        };
+                                    @endphp
                                     <button
                                         type="button"
                                         wire:click="applyRecommendedPhpDefaults"
-                                        wire:confirm="Esto rellenará los campos con los defaults recomendados para Laravel Rootkit. Tendrás que pulsar Guardar para aplicarlos. ¿Continuar?"
+                                        wire:confirm="Esto rellenará los campos con los defaults recomendados para {{ $defaultsLabel }}. Tendrás que pulsar Guardar para aplicarlos. ¿Continuar?"
                                         class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
                                         style="background-color:#27272a;color:#c4b5fd;border:1px solid #3f3f46;"
                                         onmouseover="this.style.backgroundColor='#3f3f46'"
                                         onmouseout="this.style.backgroundColor='#27272a'"
                                     >
-                                        Aplicar defaults recomendados
+                                        Aplicar defaults {{ $defaultsLabel }}
                                     </button>
                                     <button
                                         type="button"

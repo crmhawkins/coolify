@@ -53,6 +53,17 @@ class LaravelManager extends Component
     public bool $isSavingPhpIni = false;
 
     /**
+     * Detected type of the container selected in the PHP ini editor.
+     * Drives which defaults are applied and whether we even render the
+     * editor: "nginx" containers skip the editor entirely with an info
+     * card, "phpmyadmin" and "laravel" both show the form but populate
+     * the "Aplicar defaults" button with the appropriate preset.
+     *
+     * Possible values: '', 'nginx', 'phpmyadmin', 'laravel'.
+     */
+    public string $selectedContainerType = '';
+
+    /**
      * PHP ini keys the Laravel Manager exposes in the editor, in the order
      * they appear in the UI. Every key has a sensible default tuned for a
      * Laravel Rootkit production container (Apartamentos-class apps that
@@ -77,7 +88,13 @@ class LaravelManager extends Component
         'realpath_cache_ttl',
     ];
 
-    public const PHP_INI_RECOMMENDED_DEFAULTS = [
+    /**
+     * Defaults tuned for a Laravel Rootkit production container:
+     * generous upload/memory limits, aggressive OPcache with
+     * revalidate_freq=0 so deploys pick up code changes instantly,
+     * and a warm realpath cache for autoload performance.
+     */
+    public const PHP_INI_DEFAULTS_LARAVEL = [
         'upload_max_filesize' => '100M',
         'post_max_size' => '100M',
         'max_execution_time' => '300',
@@ -88,6 +105,29 @@ class LaravelManager extends Component
         'opcache.memory_consumption' => '256',
         'opcache.max_accelerated_files' => '20000',
         'opcache.revalidate_freq' => '0',
+        'realpath_cache_size' => '4096K',
+        'realpath_cache_ttl' => '600',
+    ];
+
+    /**
+     * Defaults tuned for a phpMyAdmin container: the main workloads are
+     * huge SQL dump imports, long-running queries and large result set
+     * exports — so we max out upload size, runtime and memory. OPcache
+     * is kept smaller because phpMyAdmin is relatively static and does
+     * not benefit from cache-everything, and revalidate_freq=60 is fine
+     * because phpMyAdmin itself never changes at runtime.
+     */
+    public const PHP_INI_DEFAULTS_PHPMYADMIN = [
+        'upload_max_filesize' => '512M',
+        'post_max_size' => '512M',
+        'max_execution_time' => '600',
+        'max_input_time' => '600',
+        'memory_limit' => '1024M',
+        'max_input_vars' => '10000',
+        'max_file_uploads' => '20',
+        'opcache.memory_consumption' => '128',
+        'opcache.max_accelerated_files' => '10000',
+        'opcache.revalidate_freq' => '60',
         'realpath_cache_size' => '4096K',
         'realpath_cache_ttl' => '600',
     ];
@@ -279,6 +319,39 @@ class LaravelManager extends Component
         }
     }
 
+    /**
+     * Best-effort heuristic for detecting the flavour of a container
+     * picked up by detectLaravelContainers(). Used by loadPhpIniSettings
+     * to decide whether the ini editor even applies (nginx → no PHP)
+     * and by applyRecommendedPhpDefaults to pick which defaults preset
+     * to load (Laravel vs phpMyAdmin). We match on the image name
+     * first, then fall back to the application's human name so
+     * containers without a tagged image still get classified.
+     *
+     * @param  array<string, mixed>  $container
+     */
+    private function determineContainerType(array $container): string
+    {
+        $application = $container['application'] ?? null;
+        $image = strtolower((string) ($application->image ?? ''));
+        $name = strtolower((string) ($container['name'] ?? ''));
+
+        // nginx is a pure web server container — no PHP interpreter,
+        // the ini editor has nothing to do here.
+        if (str_contains($image, 'nginx') || preg_match('/(^|[-_])nginx([-_]|$)/', $name)) {
+            return 'nginx';
+        }
+
+        // phpMyAdmin runs PHP but for a totally different workload
+        // (huge SQL imports, long queries, no artisan workers).
+        if (str_contains($image, 'phpmyadmin') || preg_match('/(^|[-_])phpmyadmin([-_]|$)/', $name)) {
+            return 'phpmyadmin';
+        }
+
+        // Everything else is treated as a Laravel-class container.
+        return 'laravel';
+    }
+
     public function loadPhpIniSettings()
     {
         if (! $this->selectedContainerForPhpIni) {
@@ -288,6 +361,7 @@ class LaravelManager extends Component
         $this->isLoadingPhpIni = true;
         $this->phpIniSettings = [];
         $this->phpIniEditableValues = [];
+        $this->selectedContainerType = '';
 
         try {
             $container = collect($this->laravelContainers)->firstWhere('id', $this->selectedContainerForPhpIni);
@@ -301,6 +375,18 @@ class LaravelManager extends Component
             $application = $container['application'] ?? $this->applications->find($container['id']);
             if (! $application || ! str($application->status)->contains('running')) {
                 $this->dispatch('error', 'Container is not running.');
+                $this->isLoadingPhpIni = false;
+
+                return;
+            }
+
+            $this->selectedContainerType = $this->determineContainerType($container);
+
+            // Short-circuit for nginx: it has no PHP interpreter so
+            // running `php -r ini_get(...)` would just error out. We
+            // still finished the selection flow cleanly so the blade
+            // can render the "no hace falta tocar nada aquí" card.
+            if ($this->selectedContainerType === 'nginx') {
                 $this->isLoadingPhpIni = false;
 
                 return;
@@ -369,11 +455,21 @@ class LaravelManager extends Component
      */
     public function applyRecommendedPhpDefaults(): void
     {
+        $defaults = match ($this->selectedContainerType) {
+            'phpmyadmin' => self::PHP_INI_DEFAULTS_PHPMYADMIN,
+            default => self::PHP_INI_DEFAULTS_LARAVEL,
+        };
+
+        $label = match ($this->selectedContainerType) {
+            'phpmyadmin' => 'phpMyAdmin',
+            default => 'Laravel Rootkit',
+        };
+
         $this->phpIniEditableValues = [];
         foreach (self::PHP_INI_EDITABLE_KEYS as $i => $key) {
-            $this->phpIniEditableValues[$i] = (string) (self::PHP_INI_RECOMMENDED_DEFAULTS[$key] ?? '');
+            $this->phpIniEditableValues[$i] = (string) ($defaults[$key] ?? '');
         }
-        $this->dispatch('success', 'Defaults recomendados aplicados. Pulsa "Guardar" para persistirlos.');
+        $this->dispatch('success', "Defaults recomendados para {$label} aplicados. Pulsa \"Guardar\" para persistirlos.");
     }
 
     /**
