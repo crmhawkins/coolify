@@ -78,6 +78,22 @@
                         </svg>
                         Restart
                     </x-forms.button>
+                    {{-- Re-SSL: forces Traefik to re-issue the TLS
+                         certificate(s) for THIS service only. Surgical:
+                         reads $service->applications->fqdn, prunes
+                         only those entries from acme.json, signals
+                         SIGHUP to the proxy, and restarts only this
+                         service's containers. Other services on the
+                         same server keep their certs intact. --}}
+                    <x-forms.button title="Re-SSL: fuerza a Traefik a re-emitir el certificado TLS SOLO para los dominios de este servicio (quirúrgico, no afecta a otros servicios)"
+                        @click="$wire.dispatch('regenerateSslEvent')">
+                        <svg class="w-5 h-5 dark:text-primary" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                        </svg>
+                        Re-SSL
+                    </x-forms.button>
                     <x-modal-confirmation title="Confirm Service Stopping?" buttonTitle="Stop" :dispatchEvent="true"
                         submitAction="stop" dispatchEventType="stopEvent" :checkboxes="$checkboxes" :actions="[__('service.stop'), __('resource.non_persistent')]"
                         :confirmWithText="false" :confirmWithPassword="false" step1ButtonText="Continue" step2ButtonText="Confirm">
@@ -125,6 +141,18 @@
                             <path d="m4.9 4.9 2.9 2.9" />
                         </svg>
                         Restart
+                    </x-forms.button>
+                    {{-- Re-SSL: same as the running branch, works on
+                         degraded services too (one unhappy container
+                         does not prevent regenerating the cert). --}}
+                    <x-forms.button title="Re-SSL: fuerza a Traefik a re-emitir el certificado TLS SOLO para los dominios de este servicio (quirúrgico, no afecta a otros servicios)"
+                        @click="$wire.dispatch('regenerateSslEvent')">
+                        <svg class="w-5 h-5 dark:text-primary" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                        </svg>
+                        Re-SSL
                     </x-forms.button>
                     <x-modal-confirmation title="Confirm Service Stopping?" buttonTitle="Stop" :dispatchEvent="true"
                         submitAction="stop" dispatchEventType="stopEvent" :checkboxes="$checkboxes" :actions="[__('service.stop'), __('resource.non_persistent')]"
@@ -237,6 +265,21 @@
             $wire.$on('restartEvent', () => {
                 $wire.$dispatch('info', 'Reiniciando contenedores…');
                 $wire.$call('restart');
+            });
+            // Re-SSL: confirm first because we mutate acme.json, then
+            // call regenerateSsl() which backs up the file, prunes
+            // only THIS service's FQDN entries, signals Traefik, and
+            // restarts the service's containers. Other services on
+            // the same server are NOT touched.
+            $wire.$on('regenerateSslEvent', () => {
+                const msg = '¿Forzar a Traefik a re-emitir el certificado TLS de ESTE servicio?\n\n' +
+                    '• Se hace backup de acme.json antes de tocarlo.\n' +
+                    '• SOLO se eliminan las entradas de los dominios de este servicio — los demás sitios del servidor no se tocan.\n' +
+                    '• El nuevo certificado tarda entre 30 y 90 segundos en emitirse.\n\n' +
+                    '¿Continuar?';
+                if (!confirm(msg)) { return; }
+                $wire.$dispatch('info', 'Regenerando certificado SSL del servicio…');
+                $wire.$call('regenerateSsl');
             });
             $wire.$on('pullAndRestartEvent', () => {
                 $wire.$dispatch('info', 'Pulling new images and restarting service.');

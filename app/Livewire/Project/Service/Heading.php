@@ -4,6 +4,7 @@ namespace App\Livewire\Project\Service;
 
 use App\Actions\Docker\GetContainersStatus;
 use App\Actions\Service\FixWordPressContentPermissions;
+use App\Actions\Service\RegenerateSslForService;
 use App\Actions\Service\StartService;
 use App\Actions\Service\StopService;
 use App\Enums\ProcessStatus;
@@ -201,6 +202,43 @@ class Heading extends Component
         $activity = StartService::run($this->service, pullLatestImages: true, stopBeforeStart: true);
         $this->dispatch('activityMonitor', $activity->id);
         $this->scheduleWordPressPermissionsFix();
+    }
+
+    /**
+     * Re-SSL: forces Traefik to re-issue the TLS certificate(s) for
+     * every FQDN that belongs to THIS service only. Delegates to
+     * App\Actions\Service\RegenerateSslForService, which:
+     *
+     *   1. Collects the FQDNs from $service->applications.
+     *   2. Backs up acme.json.
+     *   3. Surgically prunes the matching certificate entries from
+     *      acme.json — other services on the same server are NOT
+     *      touched.
+     *   4. SIGHUP to the coolify-proxy container (soft reload).
+     *   5. `docker restart` on each application container of the
+     *      service so Traefik re-reads its labels and kicks off a
+     *      fresh ACME challenge.
+     *
+     * Useful when HTTPS is broken after a domain change, DNS
+     * propagation delay, rate limit recovery, or a stuck "pending"
+     * cert in acme.json. Non-destructive: the backup file and the
+     * surgical scope mean this is safe to run from production.
+     */
+    public function regenerateSsl(): void
+    {
+        try {
+            $this->authorize('update', $this->service);
+
+            $result = RegenerateSslForService::run($this->service);
+
+            if ($result['ok']) {
+                $this->dispatch('success', $result['message']);
+            } else {
+                $this->dispatch('error', $result['message']);
+            }
+        } catch (\Throwable $e) {
+            $this->dispatch('error', 'Re-SSL falló: '.$e->getMessage());
+        }
     }
 
     /**
