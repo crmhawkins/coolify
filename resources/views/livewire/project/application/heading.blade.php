@@ -39,11 +39,18 @@
             @if ($application->build_pack === 'dockercompose' && is_null($application->docker_compose_raw))
                 <div>Please load a Compose file.</div>
             @else
-                @if (!$application->destination->server->isSwarm())
+                {{-- Advanced dropdown (Force Deploy without cache) hidden
+                     per user request — "ya que no lo uso". Component
+                     still exists at
+                     resources/views/components/applications/advanced.blade.php
+                     and the force_deploy_without_cache / deploy(true)
+                     methods are still wired in the component, so
+                     re-enabling is a single-line revert. --}}
+                {{-- @if (!$application->destination->server->isSwarm())
                     <div>
                         <x-applications.advanced :application="$application" />
                     </div>
-                @endif
+                @endif --}}
                 <div class="flex flex-wrap gap-2">
                     @if (!str($application->status)->startsWith('exited'))
                         @if (!$application->destination->server->isSwarm())

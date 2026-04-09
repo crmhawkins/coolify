@@ -1,8 +1,16 @@
 <div>
+    {{-- Translated to Spanish + rewritten to give a clearer call to
+         action. The original text ("The latest configuration has not
+         been applied" / "Please redeploy to apply the new configuration")
+         left non-admin users confused about which button to press and
+         whether the change was safe. The new copy names the exact
+         button ("Redeploy") and mentions what happens if they ignore
+         it. Kept inside the x-popup-small shell so layout / icon /
+         close-on-click behaviour is unchanged. --}}
     @if ($isConfigurationChanged && !is_null($resource->config_hash) && !$resource->isExited())
         <x-popup-small>
             <x-slot:title>
-                The latest configuration has not been applied
+                Tienes cambios sin aplicar
             </x-slot:title>
             <x-slot:icon>
                 <svg class="hidden w-10 h-10 dark:text-warning lg:block" viewBox="0 0 256 256"
@@ -12,10 +20,14 @@
                 </svg>
             </x-slot:icon>
             <x-slot:description>
-                <span>Please redeploy to apply the new configuration.</span>
+                <span>
+                    Has editado la configuración pero el servicio todavía está ejecutando la versión anterior.
+                    Pulsa el botón <strong>Redeploy</strong> (arriba a la derecha, el icono amarillo) para aplicar los cambios.
+                    Mientras no lo hagas, el sitio seguirá funcionando con la config vieja — no pasa nada si prefieres esperar.
+                </span>
             </x-slot:description>
             <x-slot:button-text @click="disableSponsorship()">
-                Disable This Popup
+                Cerrar aviso
             </x-slot:button-text>
         </x-popup-small>
     @endif

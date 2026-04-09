@@ -62,10 +62,26 @@ class ServiceDatabase extends BaseModel
         });
     }
 
+    /**
+     * Restarts ONLY this database container, never the whole stack.
+     * Same rationale as ServiceApplication::restart() — sudo wrap
+     * for non-root servers, escaped container name. Uses
+     * instant_remote_process (not remote_process) so the caller
+     * gets synchronous feedback instead of an async queue entry
+     * that never surfaces to the UI if it fails.
+     */
     public function restart()
     {
+        $server = $this->service->server;
         $container_id = $this->name.'-'.$this->service->uuid;
-        remote_process(["docker restart {$container_id}"], $this->service->server);
+        $escapedContainer = escapeshellarg($container_id);
+
+        $command = "docker restart {$escapedContainer}";
+        if ($server->isNonRoot()) {
+            $command = "sudo {$command}";
+        }
+
+        instant_remote_process([$command], $server, false);
     }
 
     public function isRunning()

@@ -43,7 +43,15 @@
         </nav>
         @if ($service->isDeployable)
             <div class="flex flex-wrap order-first gap-2 items-center sm:order-last">
-                <x-services.advanced :service="$service" />
+                {{-- Advanced dropdown (Pull Latest Images, Force Deploy,
+                     Force Cleanup Containers) hidden per user request —
+                     "ya que no lo uso". The component itself still
+                     exists at resources/views/components/services/advanced.blade.php
+                     and the backing events (pullAndRestartEvent,
+                     forceDeployEvent, stop(true)) are still wired up in
+                     Heading.php for any future caller. Re-enable by
+                     uncommenting the line below. --}}
+                {{-- <x-services.advanced :service="$service" /> --}}
                 @if (str($service->status)->contains('running'))
                     {{-- Redeploy: full stop + start pipeline. Picks up
                          .env / php.ini / compose changes. Previously

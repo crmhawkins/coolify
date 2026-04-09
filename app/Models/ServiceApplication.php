@@ -39,10 +39,31 @@ class ServiceApplication extends BaseModel
         });
     }
 
+    /**
+     * Restarts ONLY this application container, not the whole stack.
+     * The container name is built from `<role>-<serviceUuid>` which
+     * is the exact naming Coolify uses when it spins up the compose
+     * file — so `docker restart` targets this single container and
+     * leaves every sibling (mariadb, nginx, phpmyadmin…) untouched.
+     *
+     * Adds `sudo` when the target server runs Docker as a non-root
+     * user (the common case for hardened hosts). Uses
+     * throwError=false so a missing / already-stopped container
+     * surfaces a clean error through the Livewire handler instead
+     * of crashing the request.
+     */
     public function restart()
     {
+        $server = $this->service->server;
         $container_id = $this->name.'-'.$this->service->uuid;
-        instant_remote_process(["docker restart {$container_id}"], $this->service->server);
+        $escapedContainer = escapeshellarg($container_id);
+
+        $command = "docker restart {$escapedContainer}";
+        if ($server->isNonRoot()) {
+            $command = "sudo {$command}";
+        }
+
+        instant_remote_process([$command], $server, false);
     }
 
     public static function ownedByCurrentTeamAPI(int $teamId)
