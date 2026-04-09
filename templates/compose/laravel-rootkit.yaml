@@ -72,30 +72,70 @@ services:
             apk add --no-cache supervisor curl git unzip nodejs npm
           fi
 
-          if php -m | grep -q "^pdo_mysql$" \
-            && php -m | grep -q "^zip$" \
-            && php -m | grep -q "^gd$" \
-            && php -m | grep -q "^intl$" \
-            && php -m | grep -q "^exif$" \
-            && php -m | grep -q "^mbstring$" \
-            && php -m | grep -q "^bcmath$" \
-            && php -m | grep -q "^opcache$"; then
+          # Install the superset of PHP extensions every recent
+          # Laravel version needs (9, 10, 11, 12). Keeping this as a
+          # single list instead of branching per-Laravel-version
+          # means the image warms once and then boots faster on
+          # every redeploy regardless of what the user's composer.json
+          # asks for. Extra extensions beyond what upstream ships:
+          #   - pcntl/sockets: Laravel Horizon, Octane, Reverb
+          #   - pdo_pgsql:    Laravel projects that use Postgres
+          #                   instead of (or in addition to) MySQL
+          #   - soap:         SOAP-based integrations (rare but
+          #                   blocks composer install when required)
+          #   - redis (pecl): common Laravel cache/queue driver
+          REQUIRED_EXTS="pdo_mysql pdo_pgsql zip bcmath gd intl exif mbstring opcache pcntl sockets soap"
+          MISSING_EXTS=""
+          for ext in $REQUIRED_EXTS; do
+            if ! php -m | grep -qi "^${ext}$"; then
+              MISSING_EXTS="$MISSING_EXTS $ext"
+            fi
+          done
+          if [ -z "$MISSING_EXTS" ] && php -m | grep -qi "^redis$"; then
             echo "PHP extensions already installed..."
           else
-            echo "Installing PHP extensions..."
+            echo "Installing PHP extensions:${MISSING_EXTS:- (redis pecl only)}"
             apk add --no-cache \
               libzip-dev \
               mysql-client \
               mariadb-client \
+              postgresql-dev \
+              postgresql-client \
               freetype-dev \
               libjpeg-turbo-dev \
               libpng-dev \
               oniguruma-dev \
               icu-dev \
-              libxml2-dev
-            docker-php-ext-configure gd --with-freetype --with-jpeg
-            docker-php-ext-install -j"$(nproc)" pdo_mysql zip bcmath gd intl exif mbstring opcache
+              libxml2-dev \
+              linux-headers \
+              $PHPIZE_DEPS
+            docker-php-ext-configure gd --with-freetype --with-jpeg 2>/dev/null || true
+            # Install the core set — `|| true` on individual fails so
+            # an older PHP image missing one extension does not kill
+            # the whole boot. The important ones (pdo_mysql, mbstring,
+            # opcache, gd) are validated again below and the boot
+            # aborts only if those specifically are absent.
+            for ext in $MISSING_EXTS; do
+              docker-php-ext-install -j"$(nproc)" "$ext" 2>/dev/null \
+                || echo "WARN: Could not install PHP extension '$ext' — continuing"
+            done
+            # Redis is a pecl extension, install separately so a
+            # pecl registry hiccup does not block the core ones.
+            if ! php -m | grep -qi "^redis$"; then
+              pecl install redis 2>/dev/null \
+                && docker-php-ext-enable redis 2>/dev/null \
+                || echo "WARN: Could not install redis pecl extension — Laravel queue/cache on redis will fail"
+            fi
           fi
+
+          # Hard-fail only if the essential four are missing — everything
+          # else is a "nice to have" that should not block the boot.
+          for essential in pdo_mysql mbstring opcache gd; do
+            if ! php -m | grep -qi "^${essential}$"; then
+              echo "FATAL: PHP extension '$essential' is missing after install attempt. Laravel cannot boot without it." >&2
+              exit 1
+            fi
+          done
 
           if ! grep -q "listen = 0.0.0.0:9000" /usr/local/etc/php-fpm.d/www.conf 2>/dev/null; then
             sed -i 's/listen = 127.0.0.1:9000/listen = 0.0.0.0:9000/' /usr/local/etc/php-fpm.d/www.conf
@@ -240,13 +280,36 @@ services:
           fi
 
           if [ -f package.json ]; then
-            echo "Installing Node dependencies and building Vite assets..."
+            echo "Installing frontend dependencies..."
             echo "Node version: $(node -v 2>/dev/null || echo unavailable)"
             echo "NPM version: $(npm -v 2>/dev/null || echo unavailable)"
+            # Detect the package manager the project actually uses
+            # instead of forcing npm on everyone. Priority:
+            #   pnpm-lock.yaml → pnpm (fastest + strict)
+            #   yarn.lock      → yarn classic (Laravel 8-10 default)
+            #   package-lock.json or nothing → npm
+            # This makes the template work on existing Laravel
+            # projects without forcing the user to change their
+            # frontend tooling.
+            NPM_OUTPUT=""
             set +e
-            if [ -f package-lock.json ]; then
+            if [ -f pnpm-lock.yaml ]; then
+              echo "Detected pnpm-lock.yaml — using pnpm"
+              if ! command -v pnpm >/dev/null 2>&1; then
+                npm install -g pnpm@latest >/dev/null 2>&1 || true
+              fi
+              NPM_OUTPUT="$(pnpm install --frozen-lockfile 2>&1 && pnpm run build 2>&1)"
+            elif [ -f yarn.lock ]; then
+              echo "Detected yarn.lock — using yarn"
+              if ! command -v yarn >/dev/null 2>&1; then
+                npm install -g yarn >/dev/null 2>&1 || true
+              fi
+              NPM_OUTPUT="$(yarn install --frozen-lockfile 2>&1 && yarn run build 2>&1)"
+            elif [ -f package-lock.json ]; then
+              echo "Detected package-lock.json — using npm ci"
               NPM_OUTPUT="$(npm ci --no-audit --no-fund 2>&1 && npm run build 2>&1)"
             else
+              echo "No lockfile detected — using npm install"
               NPM_OUTPUT="$(npm install --no-audit --no-fund 2>&1 && npm run build 2>&1)"
             fi
             NPM_EXIT="$?"
@@ -272,26 +335,41 @@ services:
               # error page above; the composer-install path follows the same
               # convention. Workers will keep failing and supervisord will
               # restart them, which is noisy but acceptable.
-            elif [ ! -f /var/www/html/public/build/manifest.json ]; then
-              echo "Vite build finished but manifest was not generated." >&2
+            # Build succeeded — verify the output manifest exists.
+            # Laravel projects can use THREE different bundlers and
+            # each writes the manifest to a different path. Accept
+            # any of them so we do not flag Laravel 9 / 10 projects
+            # on Laravel Mix as broken builds.
+            elif [ -f /var/www/html/public/build/manifest.json ]; then
+              echo "Vite manifest detected:"
+              ls -la /var/www/html/public/build/manifest.json
+            elif [ -f /var/www/html/public/mix-manifest.json ]; then
+              echo "Laravel Mix manifest detected (Laravel 9/10 style):"
+              ls -la /var/www/html/public/mix-manifest.json
+            elif [ -f /var/www/html/public/build/.vite/manifest.json ]; then
+              # Vite 5+ nests the manifest under .vite/
+              echo "Vite 5+ manifest detected:"
+              ls -la /var/www/html/public/build/.vite/manifest.json
+            else
+              echo "Build command finished but no frontend manifest was found." >&2
               mkdir -p /var/www/html/public
               {
                 printf '%s\n' '<!doctype html>'
                 printf '%s\n' '<html lang="en"><head><meta charset="utf-8" />'
                 printf '%s\n' '<meta name="viewport" content="width=device-width, initial-scale=1" />'
-                printf '%s\n' '<title>Coolify: Vite manifest missing</title>'
+                printf '%s\n' '<title>Coolify: frontend manifest missing</title>'
                 printf '%s\n' '<style>:root{color-scheme:dark}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#0b0f19;color:#e5e7eb}.wrap{max-width:960px;margin:0 auto;padding:32px 20px}.card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px}h1{font-size:18px;margin:0 0 12px}p{margin:0 0 12px;color:#cbd5e1}pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:12px;color:#e5e7eb}.muted{color:#94a3b8;font-size:13px}</style></head><body>'
                 printf '%s\n' '<div class="wrap"><div class="card">'
-                printf '%s\n' '<h1>Vite manifest not found</h1>'
-                printf '%s\n' '<p>Build command finished, but <code>public/build/manifest.json</code> does not exist.</p>'
-                printf '%s\n' '<p class="muted">Review package scripts and vite config in the Laravel project, then redeploy.</p>'
+                printf '%s\n' '<h1>Frontend manifest not found</h1>'
+                printf '%s\n' '<p>The frontend build command finished successfully but none of the known manifest files were generated:</p>'
+                printf '%s\n' '<pre>public/build/manifest.json        (Vite 4 and earlier)'
+                printf '%s\n' 'public/build/.vite/manifest.json  (Vite 5+)'
+                printf '%s\n' 'public/mix-manifest.json          (Laravel Mix / Webpack)</pre>'
+                printf '%s\n' '<p class="muted">Review the package.json scripts and the bundler config in the Laravel project. The build output above may indicate what happened.</p>'
                 printf '%s\n' '<pre>'
                 printf '%s\n' "$NPM_OUTPUT"
                 printf '%s\n' '</pre></div></div></body></html>'
               } > /var/www/html/public/_coolify_error.html
-            else
-              echo "Vite manifest detected:"
-              ls -la /var/www/html/public/build/manifest.json
             fi
           fi
 
