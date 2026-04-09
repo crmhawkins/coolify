@@ -133,14 +133,29 @@
                 @endif
             </div>
 
-            <div class="pt-4">
-                <x-forms.button wire:click="runNow" wire:loading.attr="disabled" wire:target="runNow" class="bg-coollabs">
-                    <span wire:loading.remove wire:target="runNow">Ejecutar backup ahora</span>
+            {{-- Three manual-run buttons:
+                 · Ambos: corre el local y encadena SFTP al acabar
+                 · Solo local: corre solo el local (ignora SFTP aunque
+                   esté activado)
+                 · Solo SFTP: re-sube el último tarball local que ya
+                   existe en disco, sin volver a dumpear nada. Útil
+                   cuando una ejecución anterior dejó el local OK
+                   pero la subida SFTP falló. --}}
+            <div class="pt-4 flex flex-wrap gap-2 items-center">
+                <x-forms.button wire:click="runNow('both')" wire:loading.attr="disabled" wire:target="runNow" class="bg-coollabs">
+                    <span wire:loading.remove wire:target="runNow">Ejecutar ambos (local + SFTP)</span>
                     <span wire:loading wire:target="runNow">Encolando…</span>
                 </x-forms.button>
-                <span class="ml-2 text-xs dark:text-neutral-400">
-                    Si SFTP está activado, se encadenará automáticamente al acabar el local.
-                </span>
+                <x-forms.button wire:click="runNow('local-only')" wire:loading.attr="disabled" wire:target="runNow">
+                    Solo backup local
+                </x-forms.button>
+                <x-forms.button wire:click="runNow('sftp-only')" wire:loading.attr="disabled" wire:target="runNow">
+                    Solo subir por SFTP
+                </x-forms.button>
+            </div>
+            <div class="text-xs dark:text-neutral-400 -mt-1">
+                "Solo SFTP" re-sube el último tarball local previo — no vuelve a dumpear las bases de datos.
+                Si un paso falla, se reintenta una vez automáticamente antes de marcarlo como fallido.
             </div>
         </div>
     @endif

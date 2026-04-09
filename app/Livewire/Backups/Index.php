@@ -269,13 +269,31 @@ class Index extends Component
     // Manual run trigger
     // ---------------------------------------------------------------
 
-    public function runNow(): void
+    /**
+     * Manual run dispatcher. Accepts one of:
+     *   - 'both'       → local backup and then SFTP upload
+     *   - 'local-only' → only the local backup
+     *   - 'sftp-only'  → re-upload the most recent completed local
+     *                    tarball via SFTP (no redump)
+     *
+     * Rejects unknown modes and also blocks if there is already a
+     * running/pending backup for the team, so two simultaneous
+     * clicks can't corrupt each other's staging directories.
+     */
+    public function runNow(string $mode = 'both'): void
     {
+        $validModes = ['both', 'local-only', 'sftp-only'];
+        if (! in_array($mode, $validModes, true)) {
+            $this->dispatch('error', 'Modo de ejecución no válido.');
+
+            return;
+        }
+
         $teamId = (int) (currentTeam()?->id ?? 0);
 
-        // Block if there is already a running backup for this team
-        // — we don't want two tarballs racing and corrupting each
-        // other's staging directories.
+        // Only block against still-running work; completed/failed
+        // rows don't block anything. The job itself will also
+        // re-validate the preconditions for the selected mode.
         $existing = TeamBackupRun::query()
             ->where('team_id', $teamId)
             ->whereIn('status', ['pending', 'running'])
@@ -286,11 +304,42 @@ class Index extends Component
             return;
         }
 
-        // Dispatch synchronously queued — relies on the horizon
-        // worker pool to pick it up. Manual runs include sftp if
-        // the toggle is on.
-        RunTeamBackupJob::dispatch($teamId, $this->local_scope, 'manual', true);
-        $this->dispatch('success', 'Backup encolado. El log se refresca automáticamente.');
+        // Quick preflight warnings for sftp-only so the user gets
+        // immediate feedback instead of having to read the history
+        // log a minute later.
+        if ($mode === 'sftp-only') {
+            if (! $this->settings->sftp_enabled) {
+                $this->dispatch('error', 'Activa el SFTP antes de usar "Solo SFTP".');
+
+                return;
+            }
+            $lastLocal = TeamBackupRun::query()
+                ->where('team_id', $teamId)
+                ->where('destination', 'local')
+                ->where('status', 'completed')
+                ->whereNotNull('artifact_path')
+                ->latest('created_at')
+                ->first();
+            if (! $lastLocal || ! is_file((string) $lastLocal->artifact_path)) {
+                $this->dispatch('error', 'No hay un tarball local previo para re-subir. Ejecuta primero un backup local.');
+
+                return;
+            }
+        }
+        if ($mode === 'local-only' && ! $this->settings->local_enabled) {
+            $this->dispatch('error', 'Activa el backup local antes de usar "Solo local".');
+
+            return;
+        }
+
+        RunTeamBackupJob::dispatch($teamId, $this->local_scope, 'manual', $mode);
+
+        $label = match ($mode) {
+            'local-only' => 'backup local',
+            'sftp-only' => 'subida SFTP',
+            default => 'backup completo (local + SFTP)',
+        };
+        $this->dispatch('success', "Encolado {$label}. El historial se refresca automáticamente.");
     }
 
     public function testSftpConnection(): void
