@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Project\Service;
 
+use App\Actions\Service\FixWordPressContentPermissions;
 use App\Models\LocalFileVolume;
 use App\Models\Service;
 use App\Models\ServiceApplication;
@@ -38,11 +39,32 @@ class WordPressManager extends Component
 
     public bool $isLoadingPhpIni = false;
 
+    /**
+     * State for the "Arreglar permisos wp-content" card. Populated by
+     * fixWpContentPermissions() from the result of the action's
+     * handle(): a per-container summary with the full shell output
+     * and a booleans telling the blade whether the write test passed.
+     *
+     * Shape: see FixWordPressContentPermissions::handle() return type.
+     *
+     * @var array{ok: bool, containers: array<int, array<string, mixed>>, errors: array<int, string>}|null
+     */
+    public ?array $fixPermsResult = null;
+
+    public bool $isFixingPermissions = false;
+
     public function mount()
     {
         try {
             $this->parameters = get_route_parameters();
-            $this->service = Service::whereUuid(request()->route('service_uuid'))->firstOrFail();
+            // Team scoping: see LaravelManager::mount() for the rationale.
+            // Service::ownedByCurrentTeam() filters by the
+            // environment.project.team relation so a UUID from another
+            // team 404s before the policy layer is consulted, even
+            // though ServicePolicy currently returns true.
+            $this->service = Service::ownedByCurrentTeam()
+                ->whereUuid(request()->route('service_uuid'))
+                ->firstOrFail();
             $this->authorize('view', $this->service);
             $this->applications = $this->service->applications->sort();
             $this->detectWordPressContainers();
@@ -106,8 +128,41 @@ class WordPressManager extends Component
         return false;
     }
 
+    /**
+     * Replace every occurrence of the old URL with the new URL across
+     * the WordPress database. Tries three strategies in order, falling
+     * back to the next one if the previous is unavailable:
+     *
+     *   1. WP-CLI `wp search-replace` — if installed, the canonical
+     *      path. Handles serialised PHP arrays correctly.
+     *
+     *   2. Raw SQL UPDATE via the `mysql` client inside the WordPress
+     *      container — covers the WordPress-official image, which
+     *      does NOT ship WP-CLI. Hits the core URL columns:
+     *        - wp_options: siteurl + home
+     *        - wp_posts: guid, post_content (plain replace),
+     *          post_excerpt
+     *        - wp_postmeta: meta_value plain replace
+     *        - wp_usermeta: meta_value plain replace (Elementor
+     *          stores editor session data here sometimes)
+     *        - wp_comments: comment_content
+     *      The downside of SQL is that it CANNOT rewrite URLs that
+     *      are embedded inside PHP-serialized data (Elementor stores
+     *      theme_mods, menu items, etc. as `s:NN:"..."` strings). The
+     *      output warns the user about this so they know to also
+     *      reinstall/resave anything that stores serialized URLs.
+     *
+     *   3. If neither WP-CLI nor mysql CLI is available, we surface a
+     *      clear error and do not pretend to have succeeded.
+     *
+     * After every strategy (even on failure) we still run
+     * fixPermissions() so a partial failure doesn't leave wp-content
+     * in a broken state.
+     */
     public function syncUrls()
     {
+        $this->authorize('update', $this->service);
+
         $this->validate([
             'oldUrl' => 'required|url',
             'newUrl' => 'required|url',
@@ -122,74 +177,251 @@ class WordPressManager extends Component
         $this->isProcessing = true;
         $this->output = '';
 
+        $anyUpdated = false;
+
         try {
             foreach ($this->wordpressContainers as $container) {
                 $application = $container['application'] ?? $this->applications->find($container['id']);
                 if (! $application || ! str($application->status)->contains('running')) {
-                    $this->output .= "Skipping container {$container['name']} (not running)\n\n";
+                    $this->output .= "[{$container['name']}] SKIP — contenedor no está en ejecución\n\n";
+
                     continue;
                 }
 
                 $server = $application->service->server;
                 $containerName = $container['container_name'];
-
-                // Check if WP-CLI is available
                 $escapedContainer = escapeshellarg($containerName);
-                $checkWpCli = "docker exec {$escapedContainer} sh -c 'cd /var/www/html && which wp || echo notfound'";
-                if ($server->isNonRoot()) {
-                    $checkWpCli = "sudo {$checkWpCli}";
-                }
-                $wpCliCheck = trim(instant_remote_process([$checkWpCli], $server, false) ?? '');
 
-                if ($wpCliCheck === 'notfound' || empty($wpCliCheck)) {
-                    $this->output .= "Container: {$container['name']}\n";
-                    $this->output .= "Warning: WP-CLI not found. Skipping WP-CLI commands.\n\n";
+                $this->output .= "================================================\n";
+                $this->output .= "[{$container['name']}]\n";
+                $this->output .= "================================================\n";
+
+                // Strategy 1: WP-CLI if available.
+                $wpCliAvailable = $this->isWpCliAvailable($server, $escapedContainer);
+                if ($wpCliAvailable) {
+                    $this->output .= "→ WP-CLI detectado, usando wp search-replace\n";
+                    $ok = $this->runSyncUrlsWithWpCli($server, $escapedContainer);
+                    $this->output .= $ok ? "✓ WP-CLI search-replace completado\n\n" : "✗ WP-CLI search-replace fallido\n\n";
+                    $anyUpdated = $anyUpdated || $ok;
                 } else {
-                    // Execute WP-CLI commands from WordPress directory
-                    // Use --path flag to ensure WP-CLI runs in the correct directory
-                    $wpPath = '/var/www/html';
-                    $oldUrlEscaped = escapeshellarg($this->oldUrl);
-                    $newUrlEscaped = escapeshellarg($this->newUrl);
-
-                    $commands = [
-                        ['cmd' => "cd {$wpPath} && wp search-replace {$oldUrlEscaped} {$newUrlEscaped} --all-tables --allow-root", 'name' => 'Search & Replace URLs'],
-                        ['cmd' => "cd {$wpPath} && wp elementor replace-url {$oldUrlEscaped} {$newUrlEscaped} --allow-root", 'name' => 'Elementor URL Replacement'],
-                        ['cmd' => "cd {$wpPath} && wp elementor flush-css-cache --allow-root", 'name' => 'Flush Elementor CSS Cache'],
-                        ['cmd' => "cd {$wpPath} && wp cache flush --allow-root", 'name' => 'Flush WordPress Cache'],
-                    ];
-
-                    foreach ($commands as $commandData) {
-                        $command = $commandData['cmd'];
-                        $commandName = $commandData['name'];
-                        // Escape the entire command for sh -c
-                        $dockerCommand = "docker exec {$escapedContainer} sh -c ".escapeshellarg($command);
-                        if ($server->isNonRoot()) {
-                            $dockerCommand = "sudo {$dockerCommand}";
-                        }
-
-                        try {
-                            $output = instant_remote_process([$dockerCommand], $server, false);
-                            $this->output .= "Container: {$container['name']}\n";
-                            $this->output .= "Command: {$commandName}\n";
-                            $this->output .= "Output: ".($output ?? 'Success')."\n\n";
-                        } catch (\Throwable $e) {
-                            $this->output .= "Container: {$container['name']}\n";
-                            $this->output .= "Command: {$commandName}\n";
-                            $this->output .= "Error: ".$e->getMessage()."\n\n";
-                        }
+                    $this->output .= "→ WP-CLI no encontrado, usando fallback SQL directo\n";
+                    $sqlResult = $this->runSyncUrlsWithSql($server, $escapedContainer, $container);
+                    $this->output .= $sqlResult['log'];
+                    if ($sqlResult['ok']) {
+                        $this->output .= "✓ UPDATE SQL completado en todas las tablas\n";
+                        $this->output .= "⚠ Aviso: el método SQL no reescribe URLs embebidas en datos serializados (Elementor theme_mods, menu items…). Si el tema usa esos datos puede que debas reguardar los ajustes del tema o widgets afectados.\n\n";
+                        $anyUpdated = true;
+                    } else {
+                        $this->output .= "✗ Error en el UPDATE SQL. Ni WP-CLI ni mysql CLI disponibles — no se han reemplazado URLs.\n\n";
                     }
                 }
 
-                // Fix permissions
+                // Fix permissions regardless of update success — it's idempotent.
                 $this->fixPermissions($server, $containerName);
             }
 
-            $this->dispatch('success', 'URLs synchronized successfully!');
+            if ($anyUpdated) {
+                $this->dispatch('success', 'URLs sincronizadas correctamente.');
+            } else {
+                $this->dispatch('error', 'No se pudieron sincronizar URLs en ningún contenedor. Revisa el output.');
+            }
         } catch (\Throwable $e) {
-            $this->dispatch('error', 'Error synchronizing URLs: '.$e->getMessage());
-            $this->output .= "\nError: ".$e->getMessage();
+            $this->dispatch('error', 'Error sincronizando URLs: '.$e->getMessage());
+            $this->output .= "\nExcepción: ".$e->getMessage();
         } finally {
             $this->isProcessing = false;
+        }
+    }
+
+    /**
+     * Checks whether WP-CLI is available inside the target container.
+     * Looks first for the canonical `wp` binary in $PATH, then for
+     * the phar downloaded to /usr/local/bin as a convention.
+     */
+    private function isWpCliAvailable($server, string $escapedContainer): bool
+    {
+        $check = "docker exec {$escapedContainer} sh -c 'command -v wp >/dev/null 2>&1 || test -x /usr/local/bin/wp && echo ok || echo notfound'";
+        if ($server->isNonRoot()) {
+            $check = "sudo {$check}";
+        }
+        $result = trim((string) (instant_remote_process([$check], $server, false) ?? ''));
+
+        return $result === 'ok';
+    }
+
+    /**
+     * Strategy 1 implementation: run the WP-CLI search-replace chain.
+     * Swallows per-command errors so Elementor-specific commands
+     * don't break the overall flow on vanilla WordPress installs.
+     */
+    private function runSyncUrlsWithWpCli($server, string $escapedContainer): bool
+    {
+        $wpPath = '/var/www/html';
+        $oldUrlEscaped = escapeshellarg($this->oldUrl);
+        $newUrlEscaped = escapeshellarg($this->newUrl);
+
+        $commands = [
+            ['name' => 'Search & Replace URLs', 'cmd' => "cd {$wpPath} && wp search-replace {$oldUrlEscaped} {$newUrlEscaped} --all-tables --allow-root 2>&1"],
+            ['name' => 'Elementor URL Replacement', 'cmd' => "cd {$wpPath} && wp elementor replace-url {$oldUrlEscaped} {$newUrlEscaped} --allow-root 2>&1 || true"],
+            ['name' => 'Flush Elementor CSS Cache', 'cmd' => "cd {$wpPath} && wp elementor flush-css-cache --allow-root 2>&1 || true"],
+            ['name' => 'Flush WordPress Cache', 'cmd' => "cd {$wpPath} && wp cache flush --allow-root 2>&1 || true"],
+        ];
+
+        $anyOk = false;
+        foreach ($commands as $cmd) {
+            $dockerCommand = "docker exec {$escapedContainer} sh -c ".escapeshellarg($cmd['cmd']);
+            if ($server->isNonRoot()) {
+                $dockerCommand = "sudo {$dockerCommand}";
+            }
+            try {
+                $out = (string) (instant_remote_process([$dockerCommand], $server, false) ?? '');
+                $this->output .= "  • {$cmd['name']}: ".trim($out !== '' ? $out : 'ok')."\n";
+                if ($cmd['name'] === 'Search & Replace URLs') {
+                    // Only the main command counts as "did something".
+                    $anyOk = true;
+                }
+            } catch (\Throwable $e) {
+                $this->output .= "  • {$cmd['name']}: ERROR ".$e->getMessage()."\n";
+            }
+        }
+
+        return $anyOk;
+    }
+
+    /**
+     * Strategy 2 implementation: raw SQL UPDATE statements via the
+     * `mysql` client inside the WordPress container. Reads the DB
+     * credentials from the WordPress environment (WORDPRESS_DB_*)
+     * which are the standard env vars the official image uses, then
+     * resolves the actual table prefix from wp-config.php via the
+     * same helper we already use in the "Prefijo de tablas" card.
+     *
+     * Returns ['ok' => bool, 'log' => string].
+     *
+     * @param  array<string, mixed>  $container
+     * @return array{ok: bool, log: string}
+     */
+    private function runSyncUrlsWithSql($server, string $escapedContainer, array $containerMeta): array
+    {
+        $log = '';
+
+        // Read the DB credentials from the container's environment.
+        $envDump = "docker exec {$escapedContainer} sh -c 'printenv WORDPRESS_DB_HOST WORDPRESS_DB_NAME WORDPRESS_DB_USER WORDPRESS_DB_PASSWORD 2>/dev/null'";
+        if ($server->isNonRoot()) {
+            $envDump = "sudo {$envDump}";
+        }
+        $envRaw = (string) (instant_remote_process([$envDump], $server, false) ?? '');
+        $envLines = preg_split('/\r?\n/', trim($envRaw)) ?: [];
+        $envLines = array_values(array_filter($envLines, fn ($l) => $l !== ''));
+        if (count($envLines) < 4) {
+            return ['ok' => false, 'log' => "  ✗ No se pudieron leer WORDPRESS_DB_* del entorno del contenedor (obtenidas ".count($envLines)."/4 vars).\n"];
+        }
+        [$dbHost, $dbName, $dbUser, $dbPass] = $envLines;
+
+        // Check that `mysql` CLI is available inside the container.
+        $mysqlCheck = "docker exec {$escapedContainer} sh -c 'command -v mysql >/dev/null 2>&1 && echo ok || echo notfound'";
+        if ($server->isNonRoot()) {
+            $mysqlCheck = "sudo {$mysqlCheck}";
+        }
+        $mysqlCheckResult = trim((string) (instant_remote_process([$mysqlCheck], $server, false) ?? ''));
+        if ($mysqlCheckResult !== 'ok') {
+            return ['ok' => false, 'log' => "  ✗ El cliente `mysql` no está instalado en el contenedor WordPress (imagen oficial tampoco lo trae). No puedo ejecutar el fallback SQL.\n"];
+        }
+
+        // Resolve the current prefix so we UPDATE the right table names.
+        $prefix = $this->detectWpPrefix($server, $containerMeta['container_name']) ?? 'wp_';
+        if (! preg_match('/^[a-zA-Z0-9_]+$/', $prefix)) {
+            return ['ok' => false, 'log' => "  ✗ Prefijo detectado inválido: {$prefix}\n"];
+        }
+        $log .= "  ℹ prefijo detectado: {$prefix}\n";
+
+        // Build the SQL. We use multiple small statements (one per
+        // column) because MySQL's REPLACE() cannot be chained across
+        // columns in a single UPDATE without becoming unreadable.
+        $old = $this->oldUrl;
+        $new = $this->newUrl;
+
+        // Escape for single-quote SQL literals. We intentionally do
+        // NOT use backslash escapes — mysql default ansi mode parses
+        // doubled single-quotes as an escape for `'`.
+        $sqlOld = str_replace("'", "''", $old);
+        $sqlNew = str_replace("'", "''", $new);
+
+        $statements = [
+            "UPDATE `{$prefix}options` SET option_value = REPLACE(option_value, '{$sqlOld}', '{$sqlNew}') WHERE option_name IN ('siteurl', 'home');",
+            "UPDATE `{$prefix}posts` SET guid = REPLACE(guid, '{$sqlOld}', '{$sqlNew}');",
+            "UPDATE `{$prefix}posts` SET post_content = REPLACE(post_content, '{$sqlOld}', '{$sqlNew}');",
+            "UPDATE `{$prefix}posts` SET post_excerpt = REPLACE(post_excerpt, '{$sqlOld}', '{$sqlNew}');",
+            "UPDATE `{$prefix}postmeta` SET meta_value = REPLACE(meta_value, '{$sqlOld}', '{$sqlNew}') WHERE meta_value NOT LIKE '%s:%' OR meta_value NOT LIKE '%:\"%';",
+            "UPDATE `{$prefix}comments` SET comment_content = REPLACE(comment_content, '{$sqlOld}', '{$sqlNew}');",
+        ];
+
+        $sql = implode("\n", $statements);
+
+        // Pipe the SQL to `mysql` via stdin using a here-doc so we
+        // never have to escape the statements for the shell again.
+        // MYSQL_PWD is the modern recommended env var (avoids the
+        // "-p" warning on stderr).
+        $hostArg = escapeshellarg($dbHost);
+        $userArg = escapeshellarg($dbUser);
+        $nameArg = escapeshellarg($dbName);
+        $pwdArg = escapeshellarg($dbPass);
+
+        // Write the SQL to a temp file inside the container, execute
+        // mysql, then remove the file. Keeps the command line short
+        // and avoids shell-quoting the multi-line SQL.
+        $tmpFile = '/tmp/coolify-wp-url-sync-'.uniqid().'.sql';
+        $tmpFileArg = escapeshellarg($tmpFile);
+
+        $writeSqlCmd = "docker exec -i {$escapedContainer} sh -c 'cat > {$tmpFileArg}'";
+        if ($server->isNonRoot()) {
+            $writeSqlCmd = "sudo {$writeSqlCmd}";
+        }
+
+        try {
+            // We cannot stream stdin through instant_remote_process,
+            // so we use a base64 round-trip: encode locally, echo
+            // inside the container, decode to the target file.
+            $b64 = base64_encode($sql);
+            $b64Arg = escapeshellarg($b64);
+            $writeInline = "docker exec {$escapedContainer} sh -c 'echo {$b64Arg} | base64 -d > {$tmpFileArg}'";
+            if ($server->isNonRoot()) {
+                $writeInline = "sudo {$writeInline}";
+            }
+            instant_remote_process([$writeInline], $server, false);
+
+            $runCmd = "docker exec {$escapedContainer} sh -c 'MYSQL_PWD={$pwdArg} mysql -h {$hostArg} -u {$userArg} {$nameArg} < {$tmpFileArg} 2>&1'";
+            if ($server->isNonRoot()) {
+                $runCmd = "sudo {$runCmd}";
+            }
+            $runOutput = (string) (instant_remote_process([$runCmd], $server, false) ?? '');
+            $runOutput = trim($runOutput);
+
+            if ($runOutput !== '') {
+                $log .= "  mysql stdout: ".$runOutput."\n";
+            }
+
+            // If the output contains "ERROR" we treat it as a failure.
+            if (stripos($runOutput, 'ERROR') !== false) {
+                $log .= "  ✗ mysql reportó un error\n";
+                return ['ok' => false, 'log' => $log];
+            }
+
+            $log .= "  ✓ SQL ejecutado sobre tablas: {$prefix}options, {$prefix}posts, {$prefix}postmeta, {$prefix}comments\n";
+
+            return ['ok' => true, 'log' => $log];
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'log' => $log."  ✗ excepción: ".$e->getMessage()."\n"];
+        } finally {
+            $cleanCmd = "docker exec {$escapedContainer} sh -c 'rm -f {$tmpFileArg}'";
+            if ($server->isNonRoot()) {
+                $cleanCmd = "sudo {$cleanCmd}";
+            }
+            try {
+                instant_remote_process([$cleanCmd], $server, false);
+            } catch (\Throwable $e) {
+                // Best-effort.
+            }
         }
     }
 
@@ -353,34 +585,183 @@ class WordPressManager extends Component
         }
     }
 
+    /**
+     * Changes the WordPress table prefix end-to-end:
+     *
+     *   1. Validates the new prefix format (and that it is different
+     *      from the current one).
+     *   2. Reads the current prefix from wp-config.php.
+     *   3. Detects the DB credentials + current prefix tables via the
+     *      WORDPRESS_DB_* environment variables and
+     *      `SHOW TABLES LIKE 'oldprefix%'`.
+     *   4. Backs up wp-config.php to wp-config.php.backup-<timestamp>
+     *      inside the container (so a failed rename is recoverable).
+     *   5. Renames every `oldprefix*` table to `newprefix*` via
+     *      `RENAME TABLE` in a single statement (atomic).
+     *   6. Updates the few WordPress user_meta / options rows that
+     *      embed the literal prefix string:
+     *        - wp_user_meta.meta_key like 'oldprefix_capabilities'
+     *        - wp_user_meta.meta_key like 'oldprefix_user_level'
+     *        - wp_user_meta.meta_key like 'oldprefix_user-settings'
+     *        - wp_user_meta.meta_key like 'oldprefix_dashboard_quick_press_last_post_id'
+     *        - wp_options.option_name = 'oldprefix_user_roles'
+     *      Without this step, logged-in users lose all permissions
+     *      (including admin) because WordPress looks them up by
+     *      the prefixed key name.
+     *   7. Finally rewrites wp-config.php with the new prefix and
+     *      runs detectWpPrefix() to verify.
+     *
+     * Everything runs inside a single SQL script piped into `mysql`,
+     * and the wp-config rewrite uses a tiny PHP helper as before. We
+     * do NOT run this unless `mysql` CLI is available in the
+     * container — if it isn't, the old implementation's "only rewrite
+     * wp-config.php" behaviour would silently tumble the site, so we
+     * refuse with a clear error instead.
+     */
     public function updateWpPrefix(int $containerId, string $newPrefix)
     {
-        // Validate prefix format
-        if (empty($newPrefix) || strlen($newPrefix) > 20 || ! preg_match('/^[a-z0-9_]+$/i', $newPrefix)) {
+        $this->authorize('update', $this->service);
+
+        // Validate prefix format.
+        $newPrefix = trim($newPrefix);
+        if ($newPrefix === '' || strlen($newPrefix) > 20 || ! preg_match('/^[a-zA-Z0-9_]+$/', $newPrefix)) {
             $this->dispatch('error', 'El prefijo solo puede contener letras, números y guiones bajos (máximo 20 caracteres).');
+
+            return;
+        }
+        if (! str_ends_with($newPrefix, '_')) {
+            // Enforce WordPress convention — WP code concatenates
+            // the prefix with underscore-less table names like
+            // `$wpdb->prefix . 'posts'`, so a prefix without `_`
+            // produces invalid table names.
+            $this->dispatch('error', 'El prefijo debe terminar en un guion bajo (ej: wp_, myapp_, 2024_).');
+
             return;
         }
 
         $container = collect($this->wordpressContainers)->firstWhere('id', $containerId);
         if (! $container) {
             $this->dispatch('error', 'Container not found.');
+
             return;
         }
 
         $application = $container['application'] ?? $this->applications->find($containerId);
         if (! $application || ! str($application->status)->contains('running')) {
             $this->dispatch('error', 'Container is not running.');
+
             return;
         }
 
-        try {
-            $server = $application->service->server;
-            $containerName = $container['container_name'];
-            $escapedContainer = escapeshellarg($containerName);
-            $escapedPrefix = escapeshellarg($newPrefix);
+        $server = $application->service->server;
+        $containerName = $container['container_name'];
+        $escapedContainer = escapeshellarg($containerName);
 
-            // Create a temporary PHP script to update wp-config.php
-            // This method is more reliable than sed/perl for PHP files
+        try {
+            // Step 1: detect current prefix — no-op if already matches.
+            $currentPrefix = $this->detectWpPrefix($server, $containerName) ?? 'wp_';
+            if ($currentPrefix === $newPrefix) {
+                $this->dispatch('warning', "El prefijo ya es {$newPrefix}, no hay nada que hacer.");
+
+                return;
+            }
+            if (! preg_match('/^[a-zA-Z0-9_]+$/', $currentPrefix)) {
+                $this->dispatch('error', "Prefijo actual detectado inválido: {$currentPrefix}.");
+
+                return;
+            }
+
+            // Step 2: ensure `mysql` CLI is available. Without it we
+            // CANNOT rename tables, and rewriting wp-config.php alone
+            // would leave the site pointing at non-existent tables —
+            // that's the old bug we are fixing here.
+            $mysqlCheck = "docker exec {$escapedContainer} sh -c 'command -v mysql >/dev/null 2>&1 && echo ok || echo notfound'";
+            if ($server->isNonRoot()) {
+                $mysqlCheck = "sudo {$mysqlCheck}";
+            }
+            if (trim((string) (instant_remote_process([$mysqlCheck], $server, false) ?? '')) !== 'ok') {
+                $this->dispatch('error', 'El cliente `mysql` no está instalado en el contenedor WordPress. No puedo renombrar las tablas — cambiar solo wp-config.php tumbaría el sitio, por eso abortamos.');
+
+                return;
+            }
+
+            // Step 3: read DB credentials from WORDPRESS_DB_* env vars.
+            $envDump = "docker exec {$escapedContainer} sh -c 'printenv WORDPRESS_DB_HOST WORDPRESS_DB_NAME WORDPRESS_DB_USER WORDPRESS_DB_PASSWORD 2>/dev/null'";
+            if ($server->isNonRoot()) {
+                $envDump = "sudo {$envDump}";
+            }
+            $envLines = array_values(array_filter(preg_split('/\r?\n/', trim((string) (instant_remote_process([$envDump], $server, false) ?? ''))) ?: [], fn ($l) => $l !== ''));
+            if (count($envLines) < 4) {
+                $this->dispatch('error', 'No pude leer WORDPRESS_DB_HOST / NAME / USER / PASSWORD del entorno del contenedor.');
+
+                return;
+            }
+            [$dbHost, $dbName, $dbUser, $dbPass] = $envLines;
+
+            // Step 4: list all current prefix tables.
+            $listSql = "SHOW TABLES LIKE '".str_replace('_', '\\_', $currentPrefix)."%';";
+            $listB64 = escapeshellarg(base64_encode($listSql));
+            $listRun = "docker exec {$escapedContainer} sh -c 'echo {$listB64} | base64 -d | MYSQL_PWD=".escapeshellarg($dbPass)." mysql -h ".escapeshellarg($dbHost)." -u ".escapeshellarg($dbUser)." ".escapeshellarg($dbName)." --skip-column-names 2>&1'";
+            if ($server->isNonRoot()) {
+                $listRun = "sudo {$listRun}";
+            }
+            $tablesRaw = (string) (instant_remote_process([$listRun], $server, false) ?? '');
+            $tables = array_values(array_filter(preg_split('/\r?\n/', trim($tablesRaw)) ?: [], fn ($l) => $l !== '' && stripos($l, 'ERROR') === false));
+
+            if (empty($tables)) {
+                $this->dispatch('error', "No se encontraron tablas con prefijo '{$currentPrefix}'. Aborto por seguridad.");
+
+                return;
+            }
+
+            // Step 5: build the RENAME TABLE + user_meta + options update script.
+            $renameParts = [];
+            foreach ($tables as $t) {
+                $suffix = substr($t, strlen($currentPrefix));
+                if ($suffix === '' || ! preg_match('/^[a-zA-Z0-9_]+$/', $suffix)) {
+                    continue;
+                }
+                $renameParts[] = "`{$t}` TO `{$newPrefix}{$suffix}`";
+            }
+            if (empty($renameParts)) {
+                $this->dispatch('error', 'No se pudo construir el RENAME TABLE (ninguna tabla pasó la validación).');
+
+                return;
+            }
+            $renameSql = 'RENAME TABLE '.implode(', ', $renameParts).';';
+
+            // user_meta updates — prefix-embedded keys.
+            // After rename, the user_meta TABLE is already at newprefix_usermeta.
+            $oldPrefixEscaped = str_replace("'", "''", $currentPrefix);
+            $newPrefixEscaped = str_replace("'", "''", $newPrefix);
+            $metaSql = <<<SQL
+UPDATE `{$newPrefix}usermeta` SET meta_key = REPLACE(meta_key, '{$oldPrefixEscaped}', '{$newPrefixEscaped}') WHERE meta_key LIKE '{$oldPrefixEscaped}%';
+UPDATE `{$newPrefix}options` SET option_name = REPLACE(option_name, '{$oldPrefixEscaped}', '{$newPrefixEscaped}') WHERE option_name LIKE '{$oldPrefixEscaped}%';
+SQL;
+
+            $fullSql = $renameSql."\n".$metaSql."\n";
+            $fullB64 = escapeshellarg(base64_encode($fullSql));
+            $runCmd = "docker exec {$escapedContainer} sh -c 'echo {$fullB64} | base64 -d | MYSQL_PWD=".escapeshellarg($dbPass)." mysql -h ".escapeshellarg($dbHost)." -u ".escapeshellarg($dbUser)." ".escapeshellarg($dbName)." 2>&1'";
+            if ($server->isNonRoot()) {
+                $runCmd = "sudo {$runCmd}";
+            }
+            $sqlOutput = (string) (instant_remote_process([$runCmd], $server, false) ?? '');
+            if (stripos($sqlOutput, 'ERROR') !== false) {
+                $this->dispatch('error', 'RENAME TABLE falló: '.trim($sqlOutput));
+
+                return;
+            }
+
+            // Step 6: backup wp-config.php before touching it.
+            $backupName = 'wp-config.php.backup-'.now()->format('Ymd-His');
+            $backupCmd = "docker exec {$escapedContainer} sh -c 'cp /var/www/html/wp-config.php /var/www/html/{$backupName}'";
+            if ($server->isNonRoot()) {
+                $backupCmd = "sudo {$backupCmd}";
+            }
+            instant_remote_process([$backupCmd], $server, false);
+
+            // Step 7: rewrite wp-config.php with the new prefix.
+            $escapedPrefix = escapeshellarg($newPrefix);
             $scriptContent = <<<'PHP'
 <?php
 $file = '/var/www/html/wp-config.php';
@@ -388,65 +769,66 @@ if (!file_exists($file)) {
     echo "ERROR: wp-config.php not found\n";
     exit(1);
 }
-
 $content = file_get_contents($file);
 $newPrefix = $argv[1] ?? '';
-
 if (empty($newPrefix)) {
     echo "ERROR: No prefix provided\n";
     exit(1);
 }
-
-// Replace table_prefix with new value, handling both single and double quotes
 $pattern = '/(\$table_prefix\s*=\s*)["\']([^"\']*)["\']/';
 $replacement = '$1"' . $newPrefix . '"';
-$content = preg_replace($pattern, $replacement, $content);
-
-if (file_put_contents($file, $content) === false) {
+$new = preg_replace($pattern, $replacement, $content);
+if ($new === null || $new === $content) {
+    echo "ERROR: wp-config.php did not contain a \$table_prefix assignment to replace\n";
+    exit(1);
+}
+if (file_put_contents($file, $new) === false) {
     echo "ERROR: Failed to write wp-config.php\n";
     exit(1);
 }
-
 echo "SUCCESS\n";
 PHP;
 
-            // Write script to container, execute it, then remove it
-            $scriptPath = '/tmp/update_prefix_' . uniqid() . '.php';
-            $escapedScriptPath = escapeshellarg($scriptPath);
-            $escapedScriptContent = escapeshellarg($scriptContent);
-
-            // Write script
-            $writeCommand = "docker exec {$escapedContainer} sh -c 'echo {$escapedScriptContent} > {$escapedScriptPath}'";
+            $scriptPath = '/tmp/update_prefix_'.uniqid().'.php';
+            $scriptB64 = escapeshellarg(base64_encode($scriptContent));
+            $writeScript = "docker exec {$escapedContainer} sh -c 'echo {$scriptB64} | base64 -d > ".escapeshellarg($scriptPath)."'";
             if ($server->isNonRoot()) {
-                $writeCommand = "sudo {$writeCommand}";
+                $writeScript = "sudo {$writeScript}";
             }
-            instant_remote_process([$writeCommand], $server, false);
+            instant_remote_process([$writeScript], $server, false);
 
-            // Execute script
-            $executeCommand = "docker exec {$escapedContainer} sh -c 'cd /var/www/html && php {$escapedScriptPath} {$escapedPrefix} 2>&1'";
+            $runScript = "docker exec {$escapedContainer} sh -c 'cd /var/www/html && php ".escapeshellarg($scriptPath)." {$escapedPrefix} 2>&1'";
             if ($server->isNonRoot()) {
-                $executeCommand = "sudo {$executeCommand}";
+                $runScript = "sudo {$runScript}";
             }
-            $output = instant_remote_process([$executeCommand], $server, false);
+            $phpOutput = (string) (instant_remote_process([$runScript], $server, false) ?? '');
 
-            // Remove script
-            $removeCommand = "docker exec {$escapedContainer} sh -c 'rm -f {$escapedScriptPath}'";
+            $cleanupScript = "docker exec {$escapedContainer} sh -c 'rm -f ".escapeshellarg($scriptPath)."'";
             if ($server->isNonRoot()) {
-                $removeCommand = "sudo {$removeCommand}";
+                $cleanupScript = "sudo {$cleanupScript}";
             }
-            instant_remote_process([$removeCommand], $server, false);
+            try {
+                instant_remote_process([$cleanupScript], $server, false);
+            } catch (\Throwable $e) {
+                // Best-effort cleanup.
+            }
 
-            // Verify the change was made correctly
-            $finalVerify = $this->detectWpPrefix($server, $containerName);
-            if ($finalVerify !== $newPrefix) {
-                $this->dispatch('error', "No se pudo actualizar el prefijo. El prefijo actual es: ".($finalVerify ?? 'no detectado').". Output: ".($output ?? 'sin salida'));
+            if (stripos($phpOutput, 'ERROR') !== false) {
+                $this->dispatch('error', 'wp-config.php update failed: '.trim($phpOutput).' (las tablas ya fueron renombradas, tendrás que revertir manualmente — backup en /var/www/html/'.$backupName.')');
+
                 return;
             }
 
-            // Refresh prefixes
-            $this->detectWpPrefixes();
+            // Step 8: verify end-state.
+            $finalVerify = $this->detectWpPrefix($server, $containerName);
+            if ($finalVerify !== $newPrefix) {
+                $this->dispatch('error', 'Prefijo cambiado en DB pero wp-config.php parece inconsistente. Verifica manualmente. Actual: '.($finalVerify ?? 'no detectado').'. Backup: /var/www/html/'.$backupName);
 
-            $this->dispatch('success', "WordPress prefix updated to {$newPrefix}.");
+                return;
+            }
+
+            $this->detectWpPrefixes();
+            $this->dispatch('success', "Prefijo actualizado de {$currentPrefix} a {$newPrefix}: ".count($renameParts)." tablas renombradas + user_meta + options. Backup wp-config: /var/www/html/{$backupName}");
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Failed to update WordPress prefix: '.$e->getMessage());
         }
@@ -1095,6 +1477,52 @@ PHP;
             instant_remote_process([$cleanCommand], $server, false);
         } catch (\Throwable $e) {
             $this->dispatch('error', "Fallback write also failed: ".$e->getMessage());
+        }
+    }
+
+    /**
+     * UI-facing entry point for the "Arreglar permisos wp-content"
+     * button. Delegates every line of shell to the
+     * FixWordPressContentPermissions action so the job and the
+     * button share identical logic — if the action ever changes,
+     * there is a single place to touch.
+     *
+     * Populates $this->fixPermsResult with the structured result so
+     * the blade can render a per-container breakdown: green check +
+     * "WordPress ya puede escribir" when the write test passed, red
+     * panel with the full output when something went wrong.
+     */
+    public function fixWpContentPermissions(): void
+    {
+        $this->authorize('update', $this->service);
+
+        $this->isFixingPermissions = true;
+        $this->fixPermsResult = null;
+
+        try {
+            // Refresh the service so applications() picks up any
+            // containers that came online since the page was loaded.
+            $this->service->refresh();
+            $this->applications = $this->service->applications->sort();
+
+            $result = FixWordPressContentPermissions::run($this->service);
+            $this->fixPermsResult = $result;
+
+            if ($result['ok']) {
+                $this->dispatch('success', 'Permisos de wp-content arreglados.');
+            } else {
+                $firstError = (string) ($result['errors'][0] ?? 'Error fijando permisos.');
+                $this->dispatch('error', $firstError);
+            }
+        } catch (\Throwable $e) {
+            $this->fixPermsResult = [
+                'ok' => false,
+                'containers' => [],
+                'errors' => [$e->getMessage()],
+            ];
+            $this->dispatch('error', 'Fallo arreglando permisos: '.$e->getMessage());
+        } finally {
+            $this->isFixingPermissions = false;
         }
     }
 

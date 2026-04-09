@@ -3,9 +3,11 @@
 namespace App\Livewire\Project\Service;
 
 use App\Actions\Docker\GetContainersStatus;
+use App\Actions\Service\FixWordPressContentPermissions;
 use App\Actions\Service\StartService;
 use App\Actions\Service\StopService;
 use App\Enums\ProcessStatus;
+use App\Jobs\FixWordPressContentPermissionsJob;
 use App\Models\Service;
 use Illuminate\Support\Facades\Auth;
 use Livewire\Component;
@@ -152,6 +154,7 @@ class Heading extends Component
         }
         $activity = StartService::run($this->service, stopBeforeStart: true);
         $this->dispatch('activityMonitor', $activity->id);
+        $this->scheduleWordPressPermissionsFix();
     }
 
     /**
@@ -197,6 +200,43 @@ class Heading extends Component
         }
         $activity = StartService::run($this->service, pullLatestImages: true, stopBeforeStart: true);
         $this->dispatch('activityMonitor', $activity->id);
+        $this->scheduleWordPressPermissionsFix();
+    }
+
+    /**
+     * Enqueue a delayed FixWordPressContentPermissionsJob iff the
+     * service contains at least one WordPress container. The delay
+     * (45 seconds) gives the redeploy pipeline time to bring the
+     * WordPress container back up before the job runs; the job
+     * itself also has its own retry/backoff loop as a safety net
+     * for slower deploys. Services that don't contain WordPress
+     * (Laravel, bare databases, custom compose stacks, …) get zero
+     * side effects from this hook.
+     */
+    private function scheduleWordPressPermissionsFix(): void
+    {
+        try {
+            // Single action/job shared detection heuristic so both
+            // the manual button and the auto-run hook agree on what
+            // counts as "WordPress".
+            $hasWordPress = $this->service->applications
+                ->contains(fn ($app) => FixWordPressContentPermissions::make()->looksLikeWordPress($app));
+
+            if (! $hasWordPress) {
+                return;
+            }
+
+            FixWordPressContentPermissionsJob::dispatch($this->service->id)
+                ->delay(now()->addSeconds(45));
+        } catch (\Throwable $e) {
+            // Fail silent: the auto-fix is a convenience, the manual
+            // "Arreglar permisos" button in WordPress Manager is
+            // still there as a fallback if queue dispatch fails.
+            \Log::warning('scheduleWordPressPermissionsFix dispatch failed', [
+                'service_id' => $this->service->id ?? null,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     public function render()
