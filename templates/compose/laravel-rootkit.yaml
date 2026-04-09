@@ -279,6 +279,39 @@ services:
             fi
           fi
 
+          # Browsershot auto-provisioning. If composer.lock references
+          # spatie/browsershot we install Chromium + puppeteer-core
+          # inside the container so PDF generation works out of the
+          # box. Detection is composer.lock-based (not composer.json)
+          # so we pick it up whether it is a direct require or a
+          # transitive one. Projects that do not use browsershot pay
+          # ZERO cost — the apk/npm calls below are never reached,
+          # so image size and boot time stay the same for them.
+          BROWSERSHOT_DETECTED=0
+          if [ -f composer.lock ] && grep -q '"spatie/browsershot"' composer.lock 2>/dev/null; then
+            BROWSERSHOT_DETECTED=1
+            echo "Detected spatie/browsershot in composer.lock — installing Chromium + puppeteer-core..."
+            apk add --no-cache \
+              chromium \
+              nss \
+              freetype \
+              harfbuzz \
+              ca-certificates \
+              ttf-freefont 2>&1 \
+              || echo "WARN: Could not install Chromium system packages — PDF generation will fail"
+            # puppeteer-core is the headless-browser client library
+            # WITHOUT its own bundled Chromium download — paired with
+            # CHROME_PATH (written into .env further down) pointing at
+            # the system chromium binary the apk above just installed.
+            # The global install makes the module resolvable both for
+            # browsershot (which shells out to node) and anything the
+            # project itself imports.
+            if command -v npm >/dev/null 2>&1; then
+              npm install -g puppeteer-core 2>&1 \
+                || echo "WARN: Could not install puppeteer-core globally"
+            fi
+          fi
+
           if [ -f package.json ]; then
             echo "Installing frontend dependencies..."
             echo "Node version: $(node -v 2>/dev/null || echo unavailable)"
@@ -419,6 +452,17 @@ services:
           upsert_env "CACHE_DRIVER" "file"
           upsert_env "SESSION_DRIVER" "file"
 
+          # If we detected and installed browsershot deps earlier,
+          # point the Laravel config at the system chromium binary
+          # and tell Node where the global modules live on alpine.
+          # Browsershot reads CHROME_PATH at runtime to decide which
+          # binary to launch; NODE_PATH lets node require('puppeteer-core')
+          # resolve against the global install done above.
+          if [ "${BROWSERSHOT_DETECTED:-0}" = "1" ]; then
+            upsert_env "CHROME_PATH" "/usr/bin/chromium-browser"
+            upsert_env "NODE_PATH" "/usr/local/lib/node_modules"
+          fi
+
           if [ -f artisan ]; then
             echo "Running Laravel setup tasks..."
             CURRENT_APP_KEY="$(grep -E '^APP_KEY=' .env 2>/dev/null | tail -n 1 | cut -d '=' -f2-)"
@@ -428,6 +472,14 @@ services:
             php artisan optimize:clear || true
             php artisan view:clear || true
             php artisan config:clear || true
+            # Create the public/storage symlink so Laravel apps that
+            # serve user uploads out of storage/app/public work out
+            # of the box. Idempotent: succeeds silently if the link
+            # already exists, and is a no-op if the project does
+            # not use the storage disk at all. `|| true` so a symlink
+            # that already exists (from the persisted volume on
+            # redeploy) does not abort the boot.
+            php artisan storage:link 2>/dev/null || true
             DB_CONNECTION=mysql \
               DB_HOST=mariadb \
               DB_PORT=3306 \
