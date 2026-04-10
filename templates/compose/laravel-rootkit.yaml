@@ -1448,7 +1448,61 @@ services:
       - PMA_PORT=3306
       - PMA_ARBITRARY=0
       - PMA_ABSOLUTE_URI=$SERVICE_URL_PHPMYADMIN/
-      - UPLOAD_LIMIT=300M
+      # UPLOAD_LIMIT controls upload_max_filesize + post_max_size
+      # inside the phpmyadmin PHP config. 500M is generous enough
+      # to cover typical CRM dumps (WordPress, Laravel apps with
+      # media tables, etc.) without having to patch the container
+      # at deploy time.
+      - UPLOAD_LIMIT=500M
+      # MEMORY_LIMIT, MAX_EXECUTION_TIME and PHP_UPLOAD_MAX_FILESIZE
+      # are convenience env vars that the official phpmyadmin image
+      # honours via its docker-entrypoint.sh. We bump them to values
+      # that cannot realistically be hit by a real-world dump.
+      - MEMORY_LIMIT=2G
+      - MAX_EXECUTION_TIME=0
+    volumes:
+      # Host-visible bind so the user can `scp` a .sql file from
+      # their machine directly into this directory and have it
+      # show up in phpMyAdmin's "Web server upload directory"
+      # dropdown for one-click import.
+      #
+      # Why this exists: importing very large dumps (100 MB+) by
+      # browser upload hits three independent timeout layers —
+      # the browser itself, Traefik/proxy in front of the service,
+      # and PHP's internal handlers. Slow residential uplinks
+      # reliably break the chain and phpMyAdmin ends up stuck on
+      # "Processing file..." forever. Using UploadDir bypasses
+      # ALL of those layers: the file is read straight from the
+      # container filesystem during the import, no HTTP upload
+      # involved. Workflow after a fresh deploy:
+      #   1. From your laptop:  scp dump.sql root@HOST:/data/coolify/services/<uuid>/sql-imports/
+      #   2. In phpMyAdmin UI: Database → Import → pick from the
+      #      "Web server upload directory" dropdown → Go.
+      - type: bind
+        source: ./sql-imports
+        target: /sql-imports
+      # Custom phpMyAdmin config override. The official image
+      # loads any file at /etc/phpmyadmin/config.user.inc.php as
+      # an additional config on top of its defaults. We use that
+      # to register UploadDir at /sql-imports without having to
+      # rewrite the main config.inc.php.
+      - type: bind
+        source: ./phpmyadmin-user-config.php
+        target: /etc/phpmyadmin/config.user.inc.php
+        content: |
+          <?php
+          // Read SQL dumps from the on-disk directory so the
+          // "Import" tab can serve giant files without touching
+          // the browser upload path. See the comment block on
+          // the sql-imports bind mount in the compose file for
+          // the full rationale.
+          $cfg['UploadDir'] = '/sql-imports';
+
+          // Disable phpMyAdmin's internal execution time cap on
+          // the import. Combined with MAX_EXECUTION_TIME=0 in
+          // the environment, there is no per-import timeout
+          // coming from PHP at any level.
+          $cfg['ExecTimeLimit'] = 0;
     depends_on:
       mariadb:
         condition: service_healthy
