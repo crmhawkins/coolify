@@ -153,14 +153,30 @@ services:
             docker-php-ext-enable opcache 2>/dev/null || true
           fi
 
-          # Hard-fail only if the essential four are missing — everything
-          # else is a "nice to have" that should not block the boot.
-          for essential in pdo_mysql mbstring opcache gd; do
+          # Hard-fail only on truly essential extensions. opcache USED
+          # to be in this list, but reproducible field reports show
+          # docker-php-ext-install opcache + docker-php-ext-enable
+          # opcache both report success on php:8.2-fpm-alpine while
+          # `php -m` continues to NOT show the extension afterward —
+          # opcache.so is built and the conf.d file is written, but
+          # PHP refuses to load it. We have not yet identified the
+          # root cause (likely a PHP_INI_SCAN_DIR mismatch on this
+          # specific image variant). Demoting opcache from a hard
+          # fail to a warning means a CRM whose deploy hits this
+          # bug still BOOTS — Laravel runs perfectly without
+          # opcache, just a bit slower per request. The performance
+          # cost is real but not catastrophic, and a "service down"
+          # is much worse than "service slower". Re-add opcache to
+          # this list when we have a deterministic fix.
+          for essential in pdo_mysql mbstring gd; do
             if ! php -m | grep -qi "^${essential}$"; then
               echo "FATAL: PHP extension '$essential' is missing after install attempt. Laravel cannot boot without it." >&2
               exit 1
             fi
           done
+          if ! php -m | grep -qi '^opcache$'; then
+            echo "WARN: PHP extension 'opcache' could not be enabled. Laravel will boot but each request will recompile PHP files instead of using the opcode cache. Performance impact: noticeable on busy sites, harmless on small CRMs." >&2
+          fi
 
           if ! grep -q "listen = 0.0.0.0:9000" /usr/local/etc/php-fpm.d/www.conf 2>/dev/null; then
             sed -i 's/listen = 127.0.0.1:9000/listen = 0.0.0.0:9000/' /usr/local/etc/php-fpm.d/www.conf
@@ -989,6 +1005,22 @@ services:
                 || echo "WARN: Could not install puppeteer-core globally"
             fi
           fi
+
+          # Skip Puppeteer's auto-download of Chromium ON EVERY npm
+          # invocation downstream. The "puppeteer" package (NOT
+          # "puppeteer-core") runs a postinstall script that fetches
+          # ~280 MB from the Puppeteer CDN, which routinely stalls
+          # or hangs forever on small VPS uplinks. Result: npm ci
+          # never returns, the entrypoint blocks at the npm step,
+          # and the container's healthcheck eventually times out.
+          # We already installed system Chromium via apk above
+          # (when browsershot was detected in composer.lock) and
+          # CHROME_PATH is written into .env further down, so the
+          # CRM uses the system binary anyway. These two env vars
+          # tell every Puppeteer postinstall in the project's deps
+          # to skip the download cleanly.
+          export PUPPETEER_SKIP_DOWNLOAD=1
+          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
 
           if [ -f package.json ]; then
             echo "Installing frontend dependencies..."
