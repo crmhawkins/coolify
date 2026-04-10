@@ -90,6 +90,39 @@ function custom_backup_dir(): string
     return backup_dir().'/custom';
 }
 /**
+ * Translates a backup artifact path from the HOST filesystem
+ * (where RunLocalBackup writes the tarballs via
+ * instant_remote_process against the localhost server) to the
+ * path visible INSIDE the Coolify web container.
+ *
+ * Coolify's docker-compose bind-mounts /data/coolify/backups from
+ * the host to /var/www/html/storage/app/backups inside the
+ * container. Code that reads the file from PHP (the download
+ * controller, disk_free_space probes, anything else running as
+ * the coolify web process) must open the container path, not
+ * the host path — PHP inside the container doesn't see the
+ * /data/coolify/backups tree directly.
+ *
+ * Returns null if the given host path is OUTSIDE the mount tree
+ * (the user manually configured a custom local_path that is not
+ * under /data/coolify/backups). The caller should then either
+ * fall back to a remote-streaming download or show a clear error.
+ */
+function backup_host_to_container_path(string $hostPath): ?string
+{
+    $hostPath = trim($hostPath);
+    if ($hostPath === '') {
+        return null;
+    }
+    $hostPrefix = rtrim(backup_dir(), '/').'/';
+    $containerPrefix = rtrim(storage_path('app/backups'), '/').'/';
+    if (! str_starts_with($hostPath, $hostPrefix)) {
+        return null;
+    }
+
+    return $containerPrefix.substr($hostPath, strlen($hostPrefix));
+}
+/**
  * Free disk space (in bytes) at the given path ON THE COOLIFY HOST.
  * Returns null on failure so the caller can render a friendly
  * "couldn't read disk usage" hint instead of crashing the UI.

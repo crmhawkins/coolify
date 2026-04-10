@@ -133,7 +133,27 @@ class Index extends Component
 
         // Local disk free bytes — read once on mount so the "do I
         // have enough space?" box doesn't re-query on every poll.
-        $this->hostFreeBytes = coolify_host_free_bytes(rtrim($this->local_path, '/') ?: '/');
+        // The configured local_path is the HOST path (e.g.
+        // /data/coolify/backups/custom) and PHP inside the Coolify
+        // web container can't stat it directly, so we translate it
+        // through the docker bind mount first. Falls back to the
+        // container storage root if translation fails.
+        $this->hostFreeBytes = $this->readBackupsDiskFreeBytes();
+    }
+
+    /**
+     * Returns the free bytes on the disk that HOSTS the Coolify
+     * backups directory, measured from inside the container by
+     * rewriting the host path to its container-visible mount.
+     */
+    private function readBackupsDiskFreeBytes(): ?int
+    {
+        $containerPath = backup_host_to_container_path(rtrim($this->local_path, '/'));
+        if ($containerPath === null) {
+            $containerPath = rtrim(storage_path('app/backups'), '/');
+        }
+
+        return coolify_host_free_bytes($containerPath);
     }
 
     public function render()
@@ -164,7 +184,7 @@ class Index extends Component
             'local_path' => $this->local_path,
         ]);
 
-        $this->hostFreeBytes = coolify_host_free_bytes(rtrim($this->local_path, '/') ?: '/');
+        $this->hostFreeBytes = $this->readBackupsDiskFreeBytes();
         $this->dispatch('success', 'Ajustes del backup local guardados.');
     }
 
@@ -258,7 +278,7 @@ class Index extends Component
             $this->estimatedTotalBytes = (int) ($result['total_bytes'] ?? 0);
             $this->estimatedDbCount = (int) ($result['db_count'] ?? 0);
             $this->estimatedFileCount = (int) ($result['file_count'] ?? 0);
-            $this->hostFreeBytes = coolify_host_free_bytes(rtrim($this->local_path, '/') ?: '/');
+            $this->hostFreeBytes = $this->readBackupsDiskFreeBytes();
             $this->dispatch('success', 'Estimación actualizada.');
         } catch (\Throwable $e) {
             $this->dispatch('error', 'No se pudo estimar: '.mb_substr($e->getMessage(), 0, 300));

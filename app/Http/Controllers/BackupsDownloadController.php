@@ -42,11 +42,26 @@ class BackupsDownloadController extends Controller
             ->where('status', 'completed')
             ->firstOrFail();
 
-        $path = (string) $run->artifact_path;
-        if ($path === '' || ! is_file($path)) {
-            abort(404, 'El archivo de backup ya no existe en disco.');
+        $hostPath = (string) $run->artifact_path;
+        if ($hostPath === '') {
+            abort(404, 'El backup no tiene ruta asociada.');
         }
 
-        return response()->download($path, basename($path));
+        // The stored artifact_path is the HOST filesystem path (the
+        // backup was written there by instant_remote_process against
+        // the localhost server). We CANNOT open it directly from
+        // inside the Coolify web container — we have to translate it
+        // through the docker bind mount which maps host
+        // /data/coolify/backups onto /var/www/html/storage/app/backups
+        // inside the container.
+        $containerPath = backup_host_to_container_path($hostPath);
+        if ($containerPath === null || ! is_file($containerPath)) {
+            abort(404, 'El archivo de backup ya no existe en disco (ruta: '.$hostPath.').');
+        }
+
+        // Use the host basename for the download filename so the
+        // user sees coolify-backup-YYYY-MM-DD_HHMMSS.tar.gz in their
+        // browser and not the internal container path.
+        return response()->download($containerPath, basename($hostPath));
     }
 }
