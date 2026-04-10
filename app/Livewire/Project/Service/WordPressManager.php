@@ -1952,41 +1952,296 @@ PHP;
 
         $this->isApplyingPhpDefaults = true;
 
-        $applied = 0;
-        $failed = 0;
         try {
-            foreach (self::WP_PHP_INI_DEFAULTS as $key => $value) {
-                try {
-                    // updatePhpIniSetting dispatches its own events. To
-                    // avoid a toast storm (7 success toasts in a row)
-                    // we temporarily silence it by wrapping in a
-                    // try/catch and counting locally.
-                    $this->updatePhpIniSetting($key, $value);
-                    $applied++;
-                } catch (\Throwable $e) {
-                    \Log::warning('applyRecommendedPhpDefaults: per-key failure', [
-                        'key' => $key,
-                        'value' => $value,
-                        'error' => $e->getMessage(),
-                    ]);
-                    $failed++;
-                }
-            }
+            // Single batched call instead of looping updatePhpIniSetting
+            // 7 times. The previous loop fired ~30 SSH/docker exec commands
+            // PER directive plus a full container restart for any of
+            // memory_limit / upload_max_filesize / post_max_size — total
+            // ~200 SSH calls + 3 restarts, which routinely exceeded the
+            // nginx 60s timeout and produced 504 Gateway Time-out for
+            // the user. The batched method does:
+            //   1. Find conf.d ONCE
+            //   2. Build ONE conf.d file containing every directive
+            //   3. SCP + docker cp ONCE
+            //   4. Restart container ONCE (only if any directive needs it)
+            //   5. Verify ONCE
+            // Total: ~10-15 SSH calls + 1 restart, well under 60s.
+            $result = $this->batchUpdatePhpIniSettings(self::WP_PHP_INI_DEFAULTS);
 
             // Reload so the form reflects whatever PHP actually
             // ended up with after the saves.
             $this->loadPhpIniSettings($this->selectedContainerForPhpIni);
 
-            if ($failed === 0) {
-                $this->dispatch('success', "Defaults WordPress aplicados: {$applied} directivas actualizadas. Puede que necesites un Restart para que memory_limit / upload_max_filesize surtan efecto.");
+            if ($result['failed'] === 0) {
+                $this->dispatch('success', "Defaults WordPress aplicados: {$result['applied']} directivas actualizadas y verificadas.");
             } else {
-                $this->dispatch('warning', "Defaults WordPress parcialmente aplicados: {$applied} ok, {$failed} fallidos. Revisa los logs.");
+                $errSnippet = implode(' · ', array_slice($result['errors'], 0, 3));
+                $this->dispatch('warning', "Defaults WordPress parcialmente aplicados: {$result['applied']} ok, {$result['failed']} fallidos. {$errSnippet}");
             }
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Fallo aplicando defaults: '.$e->getMessage());
         } finally {
             $this->isApplyingPhpDefaults = false;
         }
+    }
+
+    /**
+     * Writes ALL given php.ini directives in a SINGLE conf.d file and
+     * restarts the container at most once. Designed to be called from
+     * applyRecommendedPhpDefaults() or any other "set many at once"
+     * caller without paying the per-directive cost of
+     * updatePhpIniSetting() (which is fine for one-off saves but blows
+     * up the request budget on a 7-key batch).
+     *
+     * Returns:
+     *   ['applied' => int, 'failed' => int, 'errors' => string[]]
+     *
+     * Throws on hard preconditions (no container, container down, no
+     * server). Per-directive verification failures are reported via
+     * the return array, not by throwing.
+     *
+     * @param  array<string,string|int>  $settings
+     * @return array{applied:int,failed:int,errors:string[]}
+     */
+    private function batchUpdatePhpIniSettings(array $settings): array
+    {
+        if ($this->selectedContainerForPhpIni === null) {
+            throw new \RuntimeException('Ningún contenedor seleccionado.');
+        }
+
+        $container = collect($this->wordpressContainers)->firstWhere('id', $this->selectedContainerForPhpIni);
+        if (! $container) {
+            throw new \RuntimeException('Contenedor no encontrado.');
+        }
+
+        $application = $container['application'] ?? $this->applications->find($this->selectedContainerForPhpIni);
+        if (! $application || ! str($application->status)->contains('running')) {
+            throw new \RuntimeException('El contenedor no está en ejecución.');
+        }
+
+        $server = $application->service->server;
+        $containerName = $container['container_name'];
+        $escapedContainer = escapeshellarg($containerName);
+
+        // STEP 1 — Find conf.d ONCE.
+        $confDirCandidates = [
+            '/usr/local/etc/php/conf.d',
+            '/etc/php/8.4/fpm/conf.d',
+            '/etc/php/8.3/fpm/conf.d',
+            '/etc/php/8.2/fpm/conf.d',
+            '/etc/php/8.1/fpm/conf.d',
+            '/etc/php/conf.d',
+        ];
+        $confDirPath = null;
+        foreach ($confDirCandidates as $candidate) {
+            $cmd = "docker exec {$escapedContainer} test -d ".escapeshellarg($candidate)." && echo found || echo notfound";
+            if ($server->isNonRoot()) {
+                $cmd = "sudo {$cmd}";
+            }
+            $r = trim((string) instant_remote_process([$cmd], $server, false));
+            if ($r === 'found') {
+                $confDirPath = $candidate;
+                break;
+            }
+        }
+        if ($confDirPath === null) {
+            $confDirPath = '/usr/local/etc/php/conf.d';
+            $mkdirCmd = "docker exec {$escapedContainer} mkdir -p ".escapeshellarg($confDirPath);
+            if ($server->isNonRoot()) {
+                $mkdirCmd = "sudo {$mkdirCmd}";
+            }
+            instant_remote_process([$mkdirCmd], $server, false);
+        }
+
+        // STEP 2 — Build ONE conf.d file with every directive.
+        $confContent = "; Custom PHP settings (WordPress defaults) - Updated by Coolify\n";
+        foreach ($settings as $key => $value) {
+            $confContent .= "{$key} = {$value}\n";
+        }
+
+        $confFileName = '99-coolify-wp-defaults.ini';
+        $confFilePath = $confDirPath.'/'.$confFileName;
+        $escapedConfFilePath = escapeshellarg($confFilePath);
+
+        // STEP 3 — SCP + docker cp ONCE.
+        $tmpFilename = 'temp/'.uniqid('php-ini-batch-').'.ini';
+        Storage::disk('local')->put($tmpFilename, $confContent);
+        $localTmpPath = Storage::disk('local')->path($tmpFilename);
+        $serverTmpPath = '/tmp/'.basename($tmpFilename);
+        instant_scp($localTmpPath, $serverTmpPath, $server);
+
+        $copyCmd = 'docker cp '.escapeshellarg($serverTmpPath)." {$escapedContainer}:{$escapedConfFilePath}";
+        if ($server->isNonRoot()) {
+            $copyCmd = "sudo {$copyCmd}";
+        }
+        instant_remote_process([$copyCmd], $server);
+
+        Storage::disk('local')->delete($tmpFilename);
+        $cleanCmd = 'rm -f '.escapeshellarg($serverTmpPath);
+        if ($server->isNonRoot()) {
+            $cleanCmd = "sudo {$cleanCmd}";
+        }
+        instant_remote_process([$cleanCmd], $server, false);
+
+        // STEP 4 — Persist via LocalFileVolume so the file survives
+        // the next docker-compose recreation. Failures here are NOT
+        // fatal — the file is already in the running container; we
+        // only lose persistence across recreates. Wrapped in try so a
+        // problem with the volume bookkeeping never blocks the user.
+        try {
+            $workdir = $application->service->workdir();
+            $phpConfigDir = $workdir.'/php-config';
+            $mkdirHostCmd = 'mkdir -p '.escapeshellarg($phpConfigDir);
+            if ($server->isNonRoot()) {
+                $mkdirHostCmd = "sudo {$mkdirHostCmd}";
+            }
+            instant_remote_process([$mkdirHostCmd], $server, false);
+
+            $fileVolume = LocalFileVolume::where('resource_type', ServiceApplication::class)
+                ->where('resource_id', $application->id)
+                ->where('mount_path', $confFilePath)
+                ->first();
+
+            if (! $fileVolume) {
+                $fileVolume = LocalFileVolume::create([
+                    'resource_type' => ServiceApplication::class,
+                    'resource_id' => $application->id,
+                    'fs_path' => './php-config/'.$confFileName,
+                    'mount_path' => $confFilePath,
+                    'is_directory' => false,
+                    'content' => $confContent,
+                ]);
+            } else {
+                $fileVolume->content = $confContent;
+                $fileVolume->save();
+            }
+            $fileVolume->saveStorageOnServer();
+
+            // Re-parse compose so the volume mount lands in the
+            // generated docker-compose for next deploy.
+            $this->service->parse();
+            $this->service->saveComposeConfigs();
+        } catch (\Throwable $e) {
+            \Log::warning('batchUpdatePhpIniSettings: persistence layer failed', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        // STEP 5 — Restart container ONCE if any directive needs it.
+        $needsRestart = false;
+        foreach (array_keys($settings) as $k) {
+            if (in_array($k, ['memory_limit', 'upload_max_filesize', 'post_max_size'], true)) {
+                $needsRestart = true;
+                break;
+            }
+        }
+
+        if ($needsRestart) {
+            $restartCmd = "docker restart {$escapedContainer}";
+            if ($server->isNonRoot()) {
+                $restartCmd = "sudo {$restartCmd}";
+            }
+            instant_remote_process([$restartCmd], $server, false, false, 60);
+
+            // Wait up to 10s for the container to come back up.
+            $waitCmd = "docker exec {$escapedContainer} php -r 'echo \"ready\";' 2>/dev/null || echo waiting";
+            if ($server->isNonRoot()) {
+                $waitCmd = "sudo {$waitCmd}";
+            }
+            for ($i = 0; $i < 20; $i++) {
+                $r = trim((string) instant_remote_process([$waitCmd], $server, false));
+                if ($r === 'ready') {
+                    break;
+                }
+                usleep(500000);
+            }
+        } else {
+            // Cheaper path: just reload php-fpm.
+            $reloadCmd = "docker exec {$escapedContainer} sh -c 'pkill -USR2 php-fpm 2>/dev/null || true'";
+            if ($server->isNonRoot()) {
+                $reloadCmd = "sudo {$reloadCmd}";
+            }
+            instant_remote_process([$reloadCmd], $server, false);
+        }
+
+        // STEP 6 — Verify ONCE per directive (single docker exec each,
+        // no nested checks). PHP normalises some values (e.g. 256M can
+        // come back as 268435456 from ini_get), so we accept either
+        // the literal match or the integer-byte equivalent.
+        $applied = 0;
+        $errors = [];
+        foreach ($settings as $key => $expected) {
+            $verifyCmd = "docker exec {$escapedContainer} php -r \"echo ini_get('{$key}');\" 2>/dev/null";
+            if ($server->isNonRoot()) {
+                $verifyCmd = "sudo {$verifyCmd}";
+            }
+            $actual = trim((string) instant_remote_process([$verifyCmd], $server, false));
+            if ($this->phpIniValueMatches((string) $expected, $actual)) {
+                $applied++;
+            } else {
+                $errors[] = "{$key}: esperaba {$expected}, PHP devolvió '{$actual}'";
+            }
+        }
+
+        return [
+            'applied' => $applied,
+            'failed' => count($errors),
+            'errors' => $errors,
+        ];
+    }
+
+    /**
+     * Tolerant comparator for php.ini values. PHP normalises shorthand
+     * sizes (256M → 268435456) and trims whitespace differently across
+     * SAPIs, so a strict string compare yields false negatives. We
+     * compare both as raw strings AND as parsed byte counts when
+     * applicable.
+     */
+    private function phpIniValueMatches(string $expected, string $actual): bool
+    {
+        if ($expected === $actual) {
+            return true;
+        }
+        if (strcasecmp($expected, $actual) === 0) {
+            return true;
+        }
+        $normExpected = preg_replace('/\s+/', '', $expected);
+        $normActual = preg_replace('/\s+/', '', $actual);
+        if ($normExpected !== null && $normActual !== null && strcasecmp($normExpected, $normActual) === 0) {
+            return true;
+        }
+
+        // Parse shorthand byte sizes ("256M", "1G") if either side
+        // looks numeric.
+        $parse = function (string $v): ?int {
+            $v = trim($v);
+            if ($v === '') {
+                return null;
+            }
+            if (ctype_digit($v)) {
+                return (int) $v;
+            }
+            if (preg_match('/^(\d+)\s*([kmgKMG])$/', $v, $m)) {
+                $n = (int) $m[1];
+                $unit = strtolower($m[2]);
+
+                return match ($unit) {
+                    'k' => $n * 1024,
+                    'm' => $n * 1024 * 1024,
+                    'g' => $n * 1024 * 1024 * 1024,
+                    default => $n,
+                };
+            }
+
+            return null;
+        };
+        $a = $parse($expected);
+        $b = $parse($actual);
+        if ($a !== null && $b !== null) {
+            return $a === $b;
+        }
+
+        return false;
     }
 
     public function render()
