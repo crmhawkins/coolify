@@ -1378,12 +1378,39 @@ services:
                   deny all;
               }
           }
-    # Start nginx as soon as laravel container exists (not after Laravel healthcheck).
-    # Otherwise nginx container can be missing for a long time and the UI may show "No such container".
-    # Users may briefly see 502 until PHP-FPM is ready; nginx healthcheck stays config-only for stability.
+    # Start nginx as soon as laravel container is STARTED (not after
+    # Laravel becomes healthy). This is critical because the laravel
+    # entrypoint takes 5-10 minutes on a first deploy (compiling
+    # opcache, installing composer + npm, running chromium install if
+    # spatie/browsershot is detected, etc.). During those minutes
+    # laravel is still in `health: starting`, NOT healthy.
+    #
+    # Docker Compose only evaluates `depends_on.condition` ONCE at
+    # the initial `up -d` call. If laravel is not healthy by the
+    # time Compose returns, nginx stays STUCK in "Created" state
+    # FOREVER — there is no reactive re-check when laravel finally
+    # passes its healthcheck later. Result: users see the service
+    # "deployed" in Coolify but nginx is not running at all, and
+    # any request to the domain gets a Gateway Timeout (Traefik
+    # upstream has no nginx to forward to).
+    #
+    # Using `service_started` instead of `service_healthy` makes
+    # nginx launch as soon as the laravel container is CREATED.
+    # Nginx will briefly return 502 to any request while laravel
+    # is still bootstrapping (~5-10 min first time, ~30 s on
+    # redeploy) because fastcgi_pass to laravel:9000 will get
+    # "connection refused" until php-fpm comes up. That is
+    # strictly better than the current behaviour of "no nginx
+    # container at all" — at least Traefik has an upstream to
+    # forward to, and once php-fpm is up the site starts working
+    # automatically without manual intervention.
+    #
+    # Nginx's own healthcheck (`nginx -t`) only checks config
+    # syntax, not upstream reachability, so nginx itself reports
+    # `healthy` to Coolify as soon as the container is running.
     depends_on:
       laravel:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     expose:
       - "80"
