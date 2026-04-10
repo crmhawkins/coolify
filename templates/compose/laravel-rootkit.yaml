@@ -115,9 +115,25 @@ services:
             # the whole boot. The important ones (pdo_mysql, mbstring,
             # opcache, gd) are validated again below and the boot
             # aborts only if those specifically are absent.
+            #
+            # IMPORTANT: docker-php-ext-install does NOT always
+            # auto-enable the extension after building it. opcache in
+            # particular is a `zend_extension`, not a regular
+            # `extension`, and on some PHP base images (notably
+            # 8.2-fpm-alpine) docker-php-ext-install builds opcache.so
+            # but never writes the conf.d/docker-php-ext-opcache.ini
+            # file with `zend_extension=opcache.so`. The result: the
+            # build "succeeds" but `php -m` does not show opcache,
+            # and the hard-fail check below kills the container in a
+            # restart loop. Calling docker-php-ext-enable explicitly
+            # after EVERY install is idempotent (a no-op when the
+            # extension was already enabled) and fixes that race.
             for ext in $MISSING_EXTS; do
-              docker-php-ext-install -j"$(nproc)" "$ext" 2>/dev/null \
-                || echo "WARN: Could not install PHP extension '$ext' — continuing"
+              if docker-php-ext-install -j"$(nproc)" "$ext" 2>/dev/null; then
+                docker-php-ext-enable "$ext" 2>/dev/null || true
+              else
+                echo "WARN: Could not install PHP extension '$ext' — continuing"
+              fi
             done
             # Redis is a pecl extension, install separately so a
             # pecl registry hiccup does not block the core ones.
@@ -126,6 +142,15 @@ services:
                 && docker-php-ext-enable redis 2>/dev/null \
                 || echo "WARN: Could not install redis pecl extension — Laravel queue/cache on redis will fail"
             fi
+          fi
+
+          # Last-line safety net before the hard-fail check: if opcache
+          # is on disk but not loaded (the exact failure mode on
+          # 8.2-fpm-alpine described above), force-enable it. This
+          # also covers the case where the container was rebuilt and
+          # the conf.d file was lost but the .so survived.
+          if ! php -m | grep -qi '^opcache$'; then
+            docker-php-ext-enable opcache 2>/dev/null || true
           fi
 
           # Hard-fail only if the essential four are missing — everything
