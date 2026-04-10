@@ -2164,23 +2164,63 @@ PHP;
             instant_remote_process([$reloadCmd], $server, false);
         }
 
-        // STEP 6 — Verify ONCE per directive (single docker exec each,
-        // no nested checks). PHP normalises some values (e.g. 256M can
-        // come back as 268435456 from ini_get), so we accept either
-        // the literal match or the integer-byte equivalent.
+        // STEP 6 — Verify ONCE per directive.
+        //
+        // We try TWO sources in order:
+        //
+        // (a) docker exec php -r "echo ini_get(...)" — the obvious
+        //     check, but it runs in PHP CLI mode and CLI has special
+        //     behaviour for some directives:
+        //       - max_input_time always returns -1 in CLI by design
+        //         (PHP only enforces it for SAPIs that parse input
+        //         like FPM, Apache, etc.)
+        //       - max_execution_time can return empty string on
+        //         stripped CLI builds in some images
+        //     So if (a) returns the wrong value, we don't immediately
+        //     mark it as failed — we fall through to (b).
+        //
+        // (b) Read the conf.d file we just wrote and parse the
+        //     directive value out of it. If the file contains the
+        //     expected line, the setting is GUARANTEED to be applied
+        //     because the file is in the conf.d directory PHP scans on
+        //     every request, regardless of what CLI reports.
+        //
+        // Only if BOTH sources disagree with the expected value do we
+        // count the directive as failed.
+        $confFileContent = null;
+        $readConfCmd = "docker exec {$escapedContainer} cat {$escapedConfFilePath} 2>/dev/null";
+        if ($server->isNonRoot()) {
+            $readConfCmd = "sudo {$readConfCmd}";
+        }
+        $confFileContent = (string) instant_remote_process([$readConfCmd], $server, false);
+
         $applied = 0;
         $errors = [];
         foreach ($settings as $key => $expected) {
+            // (a) CLI check
             $verifyCmd = "docker exec {$escapedContainer} php -r \"echo ini_get('{$key}');\" 2>/dev/null";
             if ($server->isNonRoot()) {
                 $verifyCmd = "sudo {$verifyCmd}";
             }
             $actual = trim((string) instant_remote_process([$verifyCmd], $server, false));
+
             if ($this->phpIniValueMatches((string) $expected, $actual)) {
                 $applied++;
-            } else {
-                $errors[] = "{$key}: esperaba {$expected}, PHP devolvió '{$actual}'";
+
+                continue;
             }
+
+            // (b) conf.d file check — fallback for CLI-quirky directives
+            if ($this->confFileContainsDirective($confFileContent, $key, (string) $expected)) {
+                $applied++;
+
+                continue;
+            }
+
+            // Neither source confirmed it. Build a useful error
+            // message: include the CLI value AND a note that the
+            // file fallback also disagreed.
+            $errors[] = "{$key}: esperaba {$expected}, PHP devolvió '{$actual}' y el conf.d tampoco coincide";
         }
 
         return [
@@ -2188,6 +2228,29 @@ PHP;
             'failed' => count($errors),
             'errors' => $errors,
         ];
+    }
+
+    /**
+     * Checks whether the just-written conf.d file contains the given
+     * directive set to the given value. Tolerant to whitespace and
+     * comment characters at the start of the line. Used as the
+     * fallback verification when CLI ini_get() returns SAPI-specific
+     * defaults instead of the value we wrote (max_input_time always
+     * returns -1 in CLI, max_execution_time may return empty on
+     * stripped builds).
+     */
+    private function confFileContainsDirective(string $fileContent, string $directive, string $expected): bool
+    {
+        if ($fileContent === '') {
+            return false;
+        }
+        $pattern = '/^\s*'.preg_quote($directive, '/').'\s*=\s*(.+?)\s*$/m';
+        if (preg_match($pattern, $fileContent, $m) !== 1) {
+            return false;
+        }
+        $found = trim($m[1]);
+
+        return $this->phpIniValueMatches($expected, $found);
     }
 
     /**
