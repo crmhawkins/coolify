@@ -294,6 +294,41 @@ function generateDefaultProxyConfiguration(Server $server, array $custom_command
                         '--entrypoints.https.http.encodequerysemicolons=true',
                         '--entryPoints.https.http2.maxConcurrentStreams=250',
                         '--entrypoints.https.http3',
+                        // Generous respondingTimeouts so large uploads
+                        // (e.g. a 200 MB SQL dump importing through
+                        // phpMyAdmin, or a big theme upload from the
+                        // WordPress admin) do NOT get cut mid-stream
+                        // by the reverse proxy. Traefik v3's default
+                        // readTimeout on the http entrypoint is about
+                        // 60s, which reliably breaks uploads above
+                        // ~50-100 MB on residential uplinks. The same
+                        // applies to writeTimeout (slow download
+                        // streaming) and idleTimeout (keep-alives on
+                        // long-running connections).
+                        //
+                        // Values here are deliberately 1h for read/
+                        // write and 10min for idle: big enough to
+                        // cover any realistic human-triggered upload
+                        // without encouraging zombie connections.
+                        // Apply to BOTH http and https entrypoints
+                        // because users hit either depending on
+                        // certificate state.
+                        '--entrypoints.http.transport.respondingTimeouts.readTimeout=3600s',
+                        '--entrypoints.http.transport.respondingTimeouts.writeTimeout=3600s',
+                        '--entrypoints.http.transport.respondingTimeouts.idleTimeout=600s',
+                        '--entrypoints.https.transport.respondingTimeouts.readTimeout=3600s',
+                        '--entrypoints.https.transport.respondingTimeouts.writeTimeout=3600s',
+                        '--entrypoints.https.transport.respondingTimeouts.idleTimeout=600s',
+                        // Forwarding timeouts between Traefik and the
+                        // backend service (the actual container
+                        // receiving the request). Without this,
+                        // Traefik's 30s default on response-header
+                        // read can cut a slow-responding app (e.g.
+                        // WordPress importing a demo zip, Laravel
+                        // warming up opcache on the first request).
+                        '--serverstransport.forwardingtimeouts.dialtimeout=30s',
+                        '--serverstransport.forwardingtimeouts.responseheadertimeout=600s',
+                        '--serverstransport.forwardingtimeouts.idleconntimeout=90s',
                         '--providers.file.directory=/traefik/dynamic/',
                         '--providers.file.watch=true',
                         '--certificatesresolvers.letsencrypt.acme.httpchallenge=true',
