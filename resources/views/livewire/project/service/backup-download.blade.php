@@ -167,18 +167,29 @@
                                                 <span style="color:#52525b;">—</span>
                                             @endif
                                         </td>
-                                        <td style="padding:0.5rem 0.75rem;vertical-align:top;text-align:right;">
+                                        <td style="padding:0.5rem 0.75rem;vertical-align:top;text-align:right;white-space:nowrap;">
+                                            {{-- Download + Quitar share the same
+                                                 exact metrics (padding, font-size,
+                                                 line-height, border-radius, border
+                                                 width) so the two controls line up
+                                                 pixel-perfect on the same row.
+                                                 The anchor is NOT styled with the
+                                                 global .button component class on
+                                                 purpose — that class adds extra
+                                                 vertical padding which used to make
+                                                 the green button visibly taller
+                                                 than its grey neighbour. Everything
+                                                 it needs is inlined here. --}}
                                             @if ($r['is_downloadable'])
                                                 <a href="{{ $r['download_url'] }}"
-                                                   class="button"
-                                                   style="background-color:#16a34a;border-color:#15803d;color:#ffffff;padding:0.25rem 0.6rem;font-size:0.625rem;text-decoration:none;display:inline-block;">
+                                                   style="display:inline-block;background-color:#16a34a;border:1px solid #15803d;border-radius:0.25rem;color:#ffffff;padding:0.25rem 0.5rem;font-size:0.625rem;font-weight:600;line-height:1;text-decoration:none;vertical-align:middle;">
                                                     Descargar
                                                 </a>
                                             @endif
                                             <button type="button"
                                                     wire:click="deleteRun({{ $r['id'] }})"
                                                     wire:confirm="¿Eliminar esta entrada del historial?"
-                                                    style="background:none;border:1px solid #3f3f46;color:#a1a1aa;border-radius:0.25rem;padding:0.25rem 0.5rem;font-size:0.625rem;margin-left:0.4rem;cursor:pointer;">
+                                                    style="display:inline-block;background:none;border:1px solid #3f3f46;border-radius:0.25rem;color:#a1a1aa;padding:0.25rem 0.5rem;font-size:0.625rem;font-weight:600;line-height:1;margin-left:0.4rem;cursor:pointer;vertical-align:middle;">
                                                 Quitar
                                             </button>
                                         </td>
