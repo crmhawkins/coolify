@@ -36,13 +36,18 @@ class ServiceBackupDownloadController extends Controller
             abort(403, 'No autorizado.');
         }
 
-        $teamId = (int) (currentTeam()?->id ?? 0);
-        if ($teamId === 0) {
+        // IMPORTANT: 0 is a VALID team id on self-hosted Coolify
+        // (the root team is seeded with id=0 and Team::find(0) is
+        // used across ScheduledJobManager, ServerManagerJob and
+        // PrivateKeyPolicy). Using null instead of 0 as the
+        // sentinel avoids rejecting legitimate root-team users.
+        $teamId = currentTeam()?->id;
+        if ($teamId === null) {
             abort(403, 'Sin equipo activo.');
         }
 
         $run = ServiceBackupRun::where('id', $id)
-            ->where('team_id', $teamId)
+            ->where('team_id', (int) $teamId)
             ->firstOrFail();
 
         // Client gate: only assigned-project access. Non-clients
