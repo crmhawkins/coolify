@@ -8,6 +8,7 @@ use App\Jobs\CheckTraefikVersionJob;
 use App\Jobs\CleanupInstanceStuffsJob;
 use App\Jobs\CleanupOrphanedPreviewContainersJob;
 use App\Jobs\DispatchTeamBackupsJob;
+use App\Jobs\PruneExpiredServiceBackupsJob;
 use App\Jobs\PullChangelog;
 use App\Jobs\PullTemplatesFromCDN;
 use App\Jobs\RegenerateSslCertJob;
@@ -60,6 +61,11 @@ class Kernel extends ConsoleKernel
             // schedule is due).
             $this->scheduleInstance->job(new DispatchTeamBackupsJob)->everyMinute()->onOneServer();
 
+            // Per-service "Backup y descarga" cleaner: removes
+            // expired (>30 min) downloadable backups from disk and
+            // flips their model rows to `expired`. Idempotent.
+            $this->scheduleInstance->job(new PruneExpiredServiceBackupsJob)->everyMinute()->onOneServer();
+
             $this->scheduleInstance->command('uploads:clear')->everyTwoMinutes();
 
         } else {
@@ -83,6 +89,10 @@ class Kernel extends ConsoleKernel
 
             // Team-wide "Backups" feature dispatcher.
             $this->scheduleInstance->job(new DispatchTeamBackupsJob)->everyMinute()->onOneServer();
+
+            // Per-service "Backup y descarga" cleaner — see the dev
+            // branch above for the rationale.
+            $this->scheduleInstance->job(new PruneExpiredServiceBackupsJob)->everyMinute()->onOneServer();
 
             $this->scheduleInstance->job(new RegenerateSslCertJob)->twiceDaily();
 

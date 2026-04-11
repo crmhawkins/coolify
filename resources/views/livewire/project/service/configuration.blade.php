@@ -43,6 +43,19 @@
             <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
                 href="{{ route('project.service.tags', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Tags</span></a>
 
+            {{-- Per-service "Backup y descarga" tab. Only shown for
+                 WordPress services — Laravel rootkit and other
+                 stacks deliberately don't get this tab. The link
+                 sits immediately above Danger Zone so it's the
+                 last "useful" thing in the sidebar before the
+                 destructive section. Visible to clients too: they
+                 can generate and download backups of services in
+                 projects they have access to. --}}
+            @if ($this->hasWordPress())
+                <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
+                    href="{{ route('project.service.backup-download', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Backup y descarga</span></a>
+            @endif
+
             <a class='sub-menu-item' wire:current.exact="menu-item-active" {{ wireNavigate() }}
                 href="{{ route('project.service.danger', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"><span class="menu-item-label">Danger Zone</span></a>
         </div>
@@ -243,6 +256,8 @@
                 <livewire:project.shared.resource-operations :resource="$service" />
             @elseif ($currentRoute === 'project.service.tags')
                 <livewire:project.shared.tags :resource="$service" />
+            @elseif ($currentRoute === 'project.service.backup-download')
+                <livewire:project.service.backup-download :service="$service" />
             @elseif ($currentRoute === 'project.service.danger')
                 <livewire:project.shared.danger :resource="$service" />
             @endif

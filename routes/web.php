@@ -299,6 +299,15 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('/webhooks', ServiceConfiguration::class)->name('project.service.webhooks');
         Route::get('/resource-operations', ServiceConfiguration::class)->name('project.service.resource-operations');
         Route::get('/tags', ServiceConfiguration::class)->name('project.service.tags');
+        // Per-service "Backup y descarga" tab. Reuses the
+        // ServiceConfiguration component so the sub-menu state
+        // (currentRoute) drives the rendered section, exactly like
+        // every other tab in this group. Authorization is in the
+        // Livewire backup-download component (hasWordPress + client
+        // assigned-project gate), not the route layer, so a non-
+        // WordPress service silently 404s its UI without crashing
+        // the page.
+        Route::get('/backup-download', ServiceConfiguration::class)->name('project.service.backup-download');
         Route::get('/danger', ServiceConfiguration::class)->name('project.service.danger');
         Route::get('/terminal', ExecuteContainerCommand::class)->name('project.service.command')->middleware('can.access.terminal');
         if (class_exists(\App\Livewire\Project\Shared\FileExplorer::class)) {
@@ -341,6 +350,17 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/backups/download/{id}', \App\Http\Controllers\BackupsDownloadController::class)
         ->name('backups.download')
         ->middleware('restrict.client')
+        ->where('id', '[0-9]+');
+
+    // Per-service "Backup y descarga" download. Unlike the
+    // team-wide /backups/download/{id} route above, this one is
+    // intentionally NOT behind restrict.client — clients are
+    // allowed to download backups of services they have project
+    // access to. The controller does the per-row authorization
+    // check (team match + assigned project for clients) so the
+    // route layer just needs to enforce auth.
+    Route::get('/service-backups/download/{id}', \App\Http\Controllers\ServiceBackupDownloadController::class)
+        ->name('service-backups.download')
         ->where('id', '[0-9]+');
 
     Route::prefix('server/{server_uuid}')->middleware('restrict.client')->group(function () {
