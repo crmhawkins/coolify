@@ -51,9 +51,6 @@
                             Cada copia que generes <span class="font-semibold">se borra
                             automáticamente 30 minutos después</span> de quedar lista
                             para descargar. Descárgala y guárdala en local cuanto antes.
-                            Si necesitas backups históricos automatizados, usa la
-                            sección <span class="font-mono">Backups</span> del menú
-                            principal en lugar de esta.
                         </div>
                     </div>
                 </div>

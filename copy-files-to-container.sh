@@ -391,6 +391,33 @@ if [ ! -z "$TEMPLATE_CHANGES" ]; then
     echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 fi
 
+# Run pending migrations if the incoming file list contains any
+# database/migrations/*.php. This is the key piece that was
+# missing: copy.sh ships new PHP migration files to the container
+# but until now it didn't re-run `php artisan migrate`, so a fresh
+# fork migration would sit on disk without ever creating its table
+# and the UI that depends on it would 500. Deploy.sh runs `migrate`
+# BEFORE copy.sh, which means the first migrate pass doesn't see
+# the file yet. This block is the second pass, after the files
+# have landed in the container.
+MIGRATION_CHANGES=$(echo "${FILES[@]}" | tr ' ' '\n' | grep -E "^database/migrations/" || echo "")
+if [ ! -z "$MIGRATION_CHANGES" ]; then
+    echo ""
+    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}Ejecutando migraciones pendientes...${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}Archivos de migración detectados:${NC}"
+    echo "$MIGRATION_CHANGES" | sed 's/^/  - /'
+    if docker exec -u www-data "$COOLIFY_CONTAINER" sh -c "cd /var/www/html && php artisan migrate --force" 2>&1; then
+        echo -e "${GREEN}✓ Migraciones aplicadas${NC}"
+    else
+        echo -e "${RED}❌ Error al aplicar migraciones. Revisa el output arriba.${NC}"
+        echo -e "${YELLOW}   Puedes reintentar manualmente con:${NC}"
+        echo -e "${YELLOW}   docker exec -u www-data $COOLIFY_CONTAINER sh -c 'cd /var/www/html && php artisan migrate --force'${NC}"
+    fi
+    echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+fi
+
 # Install update-coolify.sh into /root/ so the operator can run a
 # safe, logged, rollback-capable image upgrade at any time. The
 # script lives in the fork repo at scripts/update-coolify.sh and is
