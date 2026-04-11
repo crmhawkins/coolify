@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\ServiceBackupRun;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 /**
@@ -46,18 +47,34 @@ class ServiceBackupDownloadController extends Controller
 
         // Client gate: only assigned-project access. Non-clients
         // already passed the team check above.
+        //
+        // We go straight at the DB here instead of walking the
+        // Eloquent relations ($run->service->environment->project)
+        // or using $user->assignedProjects()->pluck(...) because
+        // Service, Environment and Project all mix in
+        // RestrictsToClientProjects — the global scope would re-
+        // enter recursively during the lazy relation loads and
+        // returns nulls on edge cases (the exact bug that broke
+        // the Livewire generate() path for a fresh client user).
+        //
+        // Two cheap reads:
+        //   1. project_id that owns the service the run is tied to
+        //   2. whether that project has a project_user pivot row
+        //      for the authenticated user
         if ($user->isClient()) {
-            $service = $run->service;
-            if ($service === null) {
+            $projectId = (int) (DB::table('services')
+                ->join('environments', 'services.environment_id', '=', 'environments.id')
+                ->where('services.id', $run->service_id)
+                ->value('environments.project_id') ?? 0);
+            if ($projectId === 0) {
                 abort(404, 'El servicio asociado a este backup ya no existe.');
             }
-            // Walk service → environment → project explicitly so
-            // we don't depend on a single relation chain that
-            // might lose the project_id under eager-load edge
-            // cases. Service::team() does the same internally.
-            $projectId = (int) (data_get($service, 'environment.project.id') ?? 0);
-            $assignedIds = $user->assignedProjects()->pluck('projects.id')->all();
-            if ($projectId === 0 || ! in_array($projectId, $assignedIds, true)) {
+
+            $hasAccess = DB::table('project_user')
+                ->where('user_id', $user->id)
+                ->where('project_id', $projectId)
+                ->exists();
+            if (! $hasAccess) {
                 abort(403, 'No tienes acceso a este servicio.');
             }
         }

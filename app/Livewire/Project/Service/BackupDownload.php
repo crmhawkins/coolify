@@ -6,6 +6,7 @@ use App\Jobs\GenerateServiceBackupJob;
 use App\Models\Service;
 use App\Models\ServiceBackupRun;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\DB;
 use Livewire\Attributes\On;
 use Livewire\Component;
 
@@ -96,26 +97,34 @@ class BackupDownload extends Component
             return;
         }
 
-        // Resolve the team_id from the project row directly. We
-        // reload the service with eager-loaded relations so a
-        // Livewire round-trip doesn't leave us with a stale model
-        // missing its environment relation, and we read team_id
-        // straight off the project pivot — NOT via the
-        // Service::team() helper or currentTeam(), both of which
-        // turned out to be flaky for newly-created client users
-        // (the original bug report).
+        // Resolve team_id via a raw DB query that bypasses
+        // every Eloquent global scope. Service, Environment AND
+        // Project all mix in RestrictsToClientProjects, which adds
+        // a whereHas/whereIn restriction by the
+        // project_user pivot when the authenticated user is a
+        // client. For the eager-load `with('environment.project')`
+        // path, the Project scope fires on the SEPARATE eager load
+        // query, and when the memoized projectIdsCache has not yet
+        // been warmed for the current request (fresh client user,
+        // first click of the Generar button) the relation returns
+        // null and data_get() collapses the whole chain.
         //
-        // Fallback chain:
-        //   1. fresh Service with environment+project loaded →
-        //      read projects.team_id
-        //   2. currentTeam()->id as a last resort
-        //   3. error out (the user sees a clear toast)
-        $freshService = Service::with('environment.project')->find($this->service->id);
-        $teamId = 0;
-        if ($freshService !== null) {
-            $teamId = (int) (data_get($freshService, 'environment.project.team_id') ?? 0);
-        }
+        // Going direct at the DB with the join sidesteps all of
+        // that. The row is guaranteed to exist (the Livewire
+        // component is already mounted for this service id, which
+        // means Configuration::mount already authorized access
+        // via currentTeam()->projects()), so this read always has
+        // a value unless the service was deleted in between the
+        // mount and the button click.
+        $teamId = (int) (DB::table('services')
+            ->join('environments', 'services.environment_id', '=', 'environments.id')
+            ->join('projects', 'environments.project_id', '=', 'projects.id')
+            ->where('services.id', $this->service->id)
+            ->value('projects.team_id') ?? 0);
         if ($teamId === 0) {
+            // Extra fallback: try the auth session. If even this
+            // is null, something is really broken and the user
+            // sees a clear toast.
             $teamId = (int) (currentTeam()?->id ?? 0);
         }
         if ($teamId === 0) {
