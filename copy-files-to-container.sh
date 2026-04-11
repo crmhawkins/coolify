@@ -391,6 +391,25 @@ if [ ! -z "$TEMPLATE_CHANGES" ]; then
     echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 fi
 
+# Install update-coolify.sh into /root/ so the operator can run a
+# safe, logged, rollback-capable image upgrade at any time. The
+# script lives in the fork repo at scripts/update-coolify.sh and is
+# just copied verbatim with executable permissions. It's idempotent
+# — running this deploy step repeatedly just keeps /root/update-coolify.sh
+# in sync with whatever is in the fork.
+if [ -f "$COOLIFY_DIR/scripts/update-coolify.sh" ]; then
+    echo ""
+    echo -e "${BLUE}Sincronizando /root/update-coolify.sh desde el fork...${NC}"
+    if ! diff -q "$COOLIFY_DIR/scripts/update-coolify.sh" /root/update-coolify.sh >/dev/null 2>&1; then
+        cp "$COOLIFY_DIR/scripts/update-coolify.sh" /root/update-coolify.sh
+        chmod +x /root/update-coolify.sh
+        echo -e "${GREEN}✓ /root/update-coolify.sh actualizado${NC}"
+    else
+        echo -e "${GREEN}✓ /root/update-coolify.sh ya está al día${NC}"
+    fi
+fi
+
+echo ""
 echo -e "${BLUE}Verificando rutas...${NC}"
 ROUTES=$(docker exec -u www-data "$COOLIFY_CONTAINER" sh -c "cd /var/www/html && php artisan route:list | grep -E '(files|Files)'" || echo "")
 if [ ! -z "$ROUTES" ]; then
