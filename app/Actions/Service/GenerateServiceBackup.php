@@ -268,31 +268,61 @@ class GenerateServiceBackup
 
     /**
      * Compress the staging dir into the final zip on the host.
-     * We use `zip -r` from the host (not from inside the
-     * containers) because the staging dir already lives on the
-     * Coolify host disk after the previous two steps. The host
-     * always has zip available — it's pulled in by the docker
-     * install on every Coolify-supported distro.
      *
-     * If the host happens not to have `zip`, we fall back to
-     * `tar -cf - ... | python3 zipfile` only when zip is missing.
-     * For now we expect zip to be there because the install
-     * script and the Coolify base image both depend on it.
+     * We run this on the Coolify HOST (via instant_remote_process
+     * against Server::find(0)) because the staging tree already
+     * lives under /data/coolify/backups on the host filesystem
+     * after the previous tar + mysqldump steps. Running the zip
+     * on the host means we don't need to stream a multi-GB
+     * archive through docker exec back into a container.
+     *
+     * The tool choice is a runtime fallback chain, NOT a build-
+     * time assumption:
+     *
+     *   1. `zip` — best compatibility with Windows clients, and
+     *      the format every platform can open natively. But it
+     *      is NOT installed by default on most Linux distros.
+     *      The previous version of this method hard-required it
+     *      and failed with "bash: zip: command not found" on the
+     *      first real backup run. This is what the operator
+     *      reported verbatim.
+     *
+     *   2. `python3 -m zipfile -c` — Python 3's stdlib zipfile
+     *      module exposes a command-line interface that creates
+     *      a real PKZIP archive without any extra dependencies.
+     *      Python 3 is part of the base install on every
+     *      Coolify-supported distro (Ubuntu 20.04+, Debian 11+,
+     *      RHEL 8+) so this is a reliable second line.
+     *
+     *   3. hard fail with a message that tells the operator what
+     *      to install. This path should never fire on a sane
+     *      host, but we want a clear error instead of an empty
+     *      zip file when it does.
+     *
+     * We build the whole thing as a single shell one-liner so it
+     * makes exactly one SSH round trip via instant_remote_process.
+     * The subshell + `cd` gives the archive a clean root (no
+     * /data/coolify/... prefix inside the entries) regardless of
+     * which tool is picked.
      */
     private function zipStagingDirectory(): void
     {
         $server = $this->getLocalServer();
 
-        // Use a subshell so the cd into the staging parent dir
-        // gives the zip file a clean tree (no /data/... prefix
-        // inside the archive). The -j (junk paths) flag would do
-        // the same but loses subdirectories — `cd` is cleaner.
         $parent = dirname($this->stagingDir);
         $stagingBase = basename($this->stagingDir);
-        $cmd = "cd ".escapeshellarg($parent)." && zip -qr ".escapeshellarg($this->zipPath)." ".escapeshellarg($stagingBase);
+        $parentArg = escapeshellarg($parent);
+        $outArg = escapeshellarg($this->zipPath);
+        $baseArg = escapeshellarg($stagingBase);
+
+        $cmd = "cd {$parentArg} && ".
+            "( command -v zip >/dev/null 2>&1 && zip -qr {$outArg} {$baseArg} ) || ".
+            "( command -v python3 >/dev/null 2>&1 && python3 -m zipfile -c {$outArg} {$baseArg} ) || ".
+            "( echo 'ERROR: el host no tiene ni zip ni python3 instalados — instala uno con: apt install zip (o python3)' >&2; exit 1 )";
+
         instant_remote_process([$cmd], $server, throwError: true, timeout: 3600, disableMultiplexing: true);
 
-        $this->assertFileExists($this->zipPath, 'No se pudo generar el zip final.');
+        $this->assertFileExists($this->zipPath, 'No se pudo generar el zip final. Revisa que el host tenga `zip` o `python3` instalados.');
     }
 
     private function cleanupStaging(): void
