@@ -616,6 +616,82 @@
                                 };
                             };
                         </script>
+
+                        {{-- Alpine component factory for the alerts
+                             bell. Paired with the <div x-data="alertsBellPanel()">
+                             higher up in the flex wrapper. Previously
+                             lived next to the old absolutely-positioned
+                             alerts block but that got swept out by
+                             the flex-refactor edit; re-declared here so
+                             the bell's x-data actually resolves and
+                             buttonLabel() returns "Alertas" instead of
+                             an empty string. --}}
+                        <script>
+                            window.alertsBellPanel = window.alertsBellPanel || function () {
+                                return {
+                                    open: false,
+                                    loading: false,
+                                    total: 0,
+                                    criticalCount: 0,
+                                    warningCount: 0,
+                                    items: [],
+                                    pollHandle: null,
+                                    init() {
+                                        this.refresh();
+                                        this.schedulePoll();
+                                    },
+                                    schedulePoll() {
+                                        if (this.pollHandle) {
+                                            clearInterval(this.pollHandle);
+                                        }
+                                        const interval = this.open ? 10000 : 30000;
+                                        this.pollHandle = setInterval(() => this.refresh(true), interval);
+                                    },
+                                    async refresh(silent = false) {
+                                        if (!silent) {
+                                            this.loading = true;
+                                        }
+                                        try {
+                                            const res = await fetch('{{ route('monitor.alerts') }}', {
+                                                method: 'GET',
+                                                headers: { 'Accept': 'application/json' },
+                                                credentials: 'same-origin',
+                                            });
+                                            if (!res.ok) return;
+                                            const payload = await res.json();
+                                            this.total = Number(payload.total || 0);
+                                            this.criticalCount = Number(payload.critical || 0);
+                                            this.warningCount = Number(payload.warning || 0);
+                                            this.items = Array.isArray(payload.items) ? payload.items : [];
+                                            this.schedulePoll();
+                                        } catch (e) {
+                                            // ignore — try again next tick
+                                        } finally {
+                                            this.loading = false;
+                                        }
+                                    },
+                                    buttonLabel() {
+                                        if (this.total === 0) return 'Alertas';
+                                        return `${this.total} ${this.total === 1 ? 'alerta' : 'alertas'}`;
+                                    },
+                                    buttonTitle() {
+                                        if (this.criticalCount > 0) return `${this.criticalCount} alertas críticas. Haz clic para ver detalles.`;
+                                        if (this.warningCount > 0) return `${this.warningCount} avisos.`;
+                                        return 'Alertas del sistema — todo OK';
+                                    },
+                                    buttonStyle() {
+                                        const base = 'display:inline-flex;align-items:center;gap:0.4rem;padding:0.35rem 0.65rem;border-radius:0.375rem;font-size:0.75rem;line-height:1;border-width:1px;border-style:solid;transition:background-color 0.15s ease,border-color 0.15s ease;white-space:nowrap;';
+                                        if (this.criticalCount > 0) {
+                                            return base + 'background-color:rgba(239,68,68,0.18);color:#fca5a5;border-color:rgba(239,68,68,0.5);animation:ct-pulse 2s ease-in-out infinite;';
+                                        }
+                                        if (this.warningCount > 0) {
+                                            return base + 'background-color:rgba(245,158,11,0.18);color:#fbbf24;border-color:rgba(245,158,11,0.5);';
+                                        }
+                                        return base + 'background-color:#18181b;color:#a1a1aa;border-color:#27272a;';
+                                    },
+                                };
+                            };
+                        </script>
                         </div> {{-- /flex wrapper for the two topbar dropdowns --}}
 
                         @endif

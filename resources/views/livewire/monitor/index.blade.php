@@ -31,57 +31,66 @@
         }
     </style>
 
-    {{-- Header row: title + counts + pause toggle + refresh --}}
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:1.25rem;">
-        <div style="min-width:0;">
-            <h1 style="font-size:1.5rem;font-weight:700;color:#ffffff;margin:0;">Monitor del sistema</h1>
-            <div style="margin-top:0.25rem;font-size:0.8125rem;color:#a1a1aa;">
-                Estado en vivo de servidores y recursos gestionados por este Coolify.
-                @if ($paused)
-                    <span style="color:#fbbf24;font-weight:600;">(actualización pausada)</span>
-                @else
-                    Se actualiza cada {{ (int) round($pollMillis / 1000) }}s.
-                @endif
+    {{-- Header.
+
+         Structured as TWO stacked rows instead of the original
+         single flex row so the right-aligned Pausar/Actualizar
+         buttons do not collide with the absolutely-positioned
+         topbar dropdowns (alerts bell + compression tasks) that
+         live in the same top-right corner of the main content
+         area. The title row explicitly reserves right-padding
+         equal to the combined width of those topbar buttons so
+         they never overlap, while the actions row flows below on
+         its own line with no right-padding so the counts pill +
+         pause + refresh get all the horizontal space they need. --}}
+    <div style="padding-right:17rem;margin-bottom:0.9rem;">
+        <h1 style="font-size:1.5rem;font-weight:700;color:#ffffff;margin:0;">Monitor del sistema</h1>
+        <div style="margin-top:0.25rem;font-size:0.8125rem;color:#a1a1aa;">
+            Estado en vivo de servidores y recursos gestionados por este Coolify.
+            @if ($paused)
+                <span style="color:#fbbf24;font-weight:600;">(actualización pausada)</span>
+            @else
+                Se actualiza cada {{ (int) round($pollMillis / 1000) }}s.
+            @endif
+        </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:1.25rem;">
+        <div style="display:flex;gap:0.75rem;align-items:center;padding:0.4rem 0.75rem;border-radius:0.375rem;background-color:#18181b;border:1px solid #27272a;">
+            <div style="display:flex;align-items:center;gap:0.4rem;">
+                <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#22c55e;"></span>
+                <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['ok'] }}</span>
+                <span style="font-size:0.6875rem;color:#71717a;">OK</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.4rem;">
+                <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#f59e0b;"></span>
+                <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['warning'] }}</span>
+                <span style="font-size:0.6875rem;color:#71717a;">warn</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.4rem;">
+                <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#ef4444;"></span>
+                <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['critical'] }}</span>
+                <span style="font-size:0.6875rem;color:#71717a;">crit</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.4rem;">
+                <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#52525b;"></span>
+                <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['stopped'] }}</span>
+                <span style="font-size:0.6875rem;color:#71717a;">stop</span>
             </div>
         </div>
-        <div style="display:flex;align-items:center;gap:0.5rem;flex-shrink:0;">
-            <div style="display:flex;gap:0.75rem;align-items:center;padding:0.4rem 0.75rem;border-radius:0.375rem;background-color:#18181b;border:1px solid #27272a;">
-                <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#22c55e;"></span>
-                    <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['ok'] }}</span>
-                    <span style="font-size:0.6875rem;color:#71717a;">OK</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#f59e0b;"></span>
-                    <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['warning'] }}</span>
-                    <span style="font-size:0.6875rem;color:#71717a;">warn</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#ef4444;"></span>
-                    <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['critical'] }}</span>
-                    <span style="font-size:0.6875rem;color:#71717a;">crit</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <span style="display:inline-block;width:0.5rem;height:0.5rem;border-radius:9999px;background-color:#52525b;"></span>
-                    <span style="font-size:0.75rem;color:#e4e4e7;font-weight:600;">{{ $counts['stopped'] }}</span>
-                    <span style="font-size:0.6875rem;color:#71717a;">stop</span>
-                </div>
-            </div>
-            <button type="button" wire:click="togglePause"
-                style="padding:0.4rem 0.75rem;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid #3f3f46;background-color:{{ $paused ? 'rgba(251,191,36,0.15)' : '#18181b' }};color:{{ $paused ? '#fbbf24' : '#e4e4e7' }};cursor:pointer;">
-                @if ($paused)
-                    ▶ Reanudar
-                @else
-                    ⏸ Pausar
-                @endif
-            </button>
-            <button type="button" wire:click="forceRefresh"
-                style="padding:0.4rem 0.75rem;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid #3f3f46;background-color:#18181b;color:#c4b5fd;cursor:pointer;"
-                wire:loading.attr="disabled">
-                <span wire:loading.remove wire:target="forceRefresh,tick">↻ Actualizar</span>
-                <span wire:loading wire:target="forceRefresh,tick" style="display:inline-block;animation:mon-spin 1s linear infinite;">↻</span>
-            </button>
-        </div>
+        <button type="button" wire:click="togglePause"
+            style="padding:0.4rem 0.75rem;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid #3f3f46;background-color:{{ $paused ? 'rgba(251,191,36,0.15)' : '#18181b' }};color:{{ $paused ? '#fbbf24' : '#e4e4e7' }};cursor:pointer;">
+            @if ($paused)
+                ▶ Reanudar
+            @else
+                ⏸ Pausar
+            @endif
+        </button>
+        <button type="button" wire:click="forceRefresh"
+            style="padding:0.4rem 0.75rem;font-size:0.75rem;font-weight:600;border-radius:0.375rem;border:1px solid #3f3f46;background-color:#18181b;color:#c4b5fd;cursor:pointer;"
+            wire:loading.attr="disabled">
+            <span wire:loading.remove wire:target="forceRefresh,tick">↻ Actualizar</span>
+            <span wire:loading wire:target="forceRefresh,tick" style="display:inline-block;animation:mon-spin 1s linear infinite;">↻</span>
+        </button>
     </div>
 
     {{-- Disk pressure banner (conditional) --}}
