@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Application;
 use App\Models\Server;
 use App\Models\Service;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 
 /**
@@ -122,6 +123,7 @@ class MonitorResourceAggregator
     {
         $status = (string) ($app->status ?? 'exited');
         $severity = self::severityOf($status);
+        [$lastIso, $lastHuman] = $this->safeTimestamp($app->last_online_at);
 
         return [
             'id' => $app->id,
@@ -135,8 +137,8 @@ class MonitorResourceAggregator
             'server_name' => (string) $server->name,
             'project_name' => (string) data_get($app, 'environment.project.name', ''),
             'environment_name' => (string) data_get($app, 'environment.name', ''),
-            'last_online_at' => optional($app->last_online_at)->toIso8601String(),
-            'last_online_human' => $app->last_online_at ? $app->last_online_at->diffForHumans() : null,
+            'last_online_at' => $lastIso,
+            'last_online_human' => $lastHuman,
             'url' => $this->applicationUrl($app),
             'is_stopped' => str_contains($status, 'exited'),
         ];
@@ -149,6 +151,7 @@ class MonitorResourceAggregator
     {
         $status = (string) ($db->status ?? 'exited');
         $severity = self::severityOf($status);
+        [$lastIso, $lastHuman] = $this->safeTimestamp(data_get($db, 'last_online_at'));
 
         return [
             'id' => $db->id,
@@ -162,11 +165,38 @@ class MonitorResourceAggregator
             'server_name' => (string) $server->name,
             'project_name' => (string) data_get($db, 'environment.project.name', ''),
             'environment_name' => (string) data_get($db, 'environment.name', ''),
-            'last_online_at' => optional(data_get($db, 'last_online_at'))->toIso8601String(),
-            'last_online_human' => data_get($db, 'last_online_at')?->diffForHumans(),
+            'last_online_at' => $lastIso,
+            'last_online_human' => $lastHuman,
             'url' => $this->databaseUrl($db),
             'is_stopped' => str_contains($status, 'exited'),
         ];
+    }
+
+    /**
+     * Defensive timestamp coercion. Not every model in the fork
+     * casts last_online_at to datetime (Application notably does
+     * NOT cast it), so reading $model->last_online_at can return
+     * a raw string. Calling ->diffForHumans() on that string blows
+     * up the whole page with "Call to a member function on string".
+     *
+     * Returns [ISO8601 string or null, human-readable relative
+     * label or null]. Never throws — any parse failure returns
+     * [null, null] so the caller can safely render "—".
+     *
+     * @return array{0: ?string, 1: ?string}
+     */
+    private function safeTimestamp(mixed $value): array
+    {
+        if ($value === null || $value === '') {
+            return [null, null];
+        }
+        try {
+            $carbon = $value instanceof \DateTimeInterface ? Carbon::instance($value) : Carbon::parse((string) $value);
+
+            return [$carbon->toIso8601String(), $carbon->diffForHumans()];
+        } catch (\Throwable $e) {
+            return [null, null];
+        }
     }
 
     /**

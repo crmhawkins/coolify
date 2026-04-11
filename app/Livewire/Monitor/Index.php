@@ -432,12 +432,30 @@ class Index extends Component
             $typeUuid = data_get($a->properties, 'type_uuid', '');
             $description = (string) ($a->description ?? $a->event ?? 'actividad');
 
+            // Defensive: Spatie's Activity model normally casts
+            // created_at to Carbon, but we have seen the fork trip
+            // on non-casted timestamps before (Application model
+            // does NOT cast last_online_at either). Carbon::parse
+            // from a raw string keeps the feed alive even if some
+            // upstream migration forgot the cast.
+            $when = null;
+            if ($a->created_at !== null) {
+                try {
+                    $carbon = $a->created_at instanceof \DateTimeInterface
+                        ? \Illuminate\Support\Carbon::instance($a->created_at)
+                        : \Illuminate\Support\Carbon::parse((string) $a->created_at);
+                    $when = $carbon->diffForHumans();
+                } catch (\Throwable $e) {
+                    $when = '';
+                }
+            }
+
             return [
                 'id' => $a->id,
                 'label' => mb_substr($description, 0, 80),
                 'status' => (string) $status,
                 'target_uuid' => (string) $typeUuid,
-                'when_human' => optional($a->created_at)->diffForHumans() ?? '',
+                'when_human' => $when ?? '',
                 'severity' => match (true) {
                     str_contains(strtolower((string) $status), 'error') => 'critical',
                     str_contains(strtolower((string) $status), 'fail') => 'critical',

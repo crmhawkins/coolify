@@ -108,9 +108,130 @@
                                 50% { opacity: 0.55; }
                             }
                         </style>
+                        {{-- Both topbar dropdowns (Alerts bell +
+                             Compression tasks) live inside a single
+                             absolutely-positioned flex container at
+                             right:0 so they flow naturally without
+                             hard-coded offsets. Left-to-right order:
+                             Alerts bell first, Compression tasks
+                             second, so Tareas sits flush against the
+                             right edge and Alertas sits to its left.
+
+                             Using a flex wrapper instead of two
+                             independent `right:Xrem` anchors avoids
+                             the overlap that happened when the tasks
+                             button grew wide ("3 en curso · 3
+                             totales" is ~14rem, which collided with
+                             an alerts bell pinned at 4.5rem). Flex
+                             takes the actual rendered widths into
+                             account so whatever labels show up, the
+                             buttons never step on each other. --}}
                         <div
                             class="z-40"
-                            style="position:absolute;right:4.5rem;top:0;"
+                            style="position:absolute;right:0;top:0;display:flex;align-items:center;gap:0.5rem;"
+                        >
+                        <div
+                            style="position:relative;"
+                            x-data="alertsBellPanel()"
+                            x-init="init()"
+                            @keydown.window.escape="open = false"
+                        >
+                            <div style="position:relative;" @click.outside="open = false">
+                                <button
+                                    type="button"
+                                    @click="open = !open; if (open) { refresh(); }"
+                                    :style="buttonStyle()"
+                                    :title="buttonTitle()"
+                                    class="rounded text-xs font-semibold shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-offset-1"
+                                >
+                                    <svg width="14" height="14" style="width:14px;height:14px;flex-shrink:0;display:block;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 00-4-5.7V5a2 2 0 10-4 0v.3A6 6 0 006 11v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 11-6 0"/>
+                                    </svg>
+                                    <span x-text="buttonLabel()"></span>
+                                    <span x-show="criticalCount > 0" x-cloak style="display:inline-block;width:0.375rem;height:0.375rem;border-radius:9999px;background-color:#ef4444;animation:ct-pulse 2s ease-in-out infinite;"></span>
+                                </button>
+
+                                <div
+                                    x-show="open"
+                                    x-cloak
+                                    x-transition:enter="transition ease-out duration-150"
+                                    x-transition:enter-start="opacity-0 scale-95 -translate-y-1"
+                                    x-transition:enter-end="opacity-100 scale-100 translate-y-0"
+                                    x-transition:leave="transition ease-in duration-100"
+                                    x-transition:leave-start="opacity-100 scale-100 translate-y-0"
+                                    x-transition:leave-end="opacity-0 scale-95 -translate-y-1"
+                                    class="rounded-lg border shadow-2xl"
+                                    style="position:absolute;right:0;top:calc(100% + 0.5rem);width:26rem;max-width:calc(100vw - 2rem);max-height:30rem;overflow:auto;background-color:#18181b;border-color:#27272a;color:#e4e4e7;"
+                                >
+                                    <div class="flex items-center justify-between gap-2 border-b px-4 py-3" style="border-color:#27272a;">
+                                        <div class="min-w-0">
+                                            <h4 class="text-sm font-semibold" style="color:#ffffff;">Alertas del sistema</h4>
+                                            <p class="mt-0.5 text-[11px]" style="color:#71717a;">
+                                                <span x-show="criticalCount > 0" x-cloak><span style="color:#f87171;font-weight:600;" x-text="criticalCount"></span> críticas · </span>
+                                                <span x-show="warningCount > 0" x-cloak><span style="color:#fbbf24;font-weight:600;" x-text="warningCount"></span> advertencias · </span>
+                                                actualización cada 10s
+                                            </p>
+                                        </div>
+                                        <a href="/monitor" wire:navigate
+                                           style="display:inline-block;padding:0.25rem 0.6rem;font-size:0.6875rem;font-weight:600;border-radius:0.25rem;background-color:rgba(139,92,246,0.15);color:#c4b5fd;border:1px solid rgba(139,92,246,0.35);text-decoration:none;">
+                                            Ver monitor
+                                        </a>
+                                    </div>
+
+                                    <template x-if="total === 0 && !loading">
+                                        <div class="flex flex-col items-center justify-center px-4 py-10 text-center">
+                                            <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="width:40px;height:40px;margin-bottom:0.5rem;color:#22c55e;display:block;">
+                                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                            </svg>
+                                            <p class="text-sm" style="color:#a1a1aa;">Todo funcionando correctamente</p>
+                                            <p class="mt-0.5 text-[11px]" style="color:#52525b;">No hay recursos con problemas en este momento.</p>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="total === 0 && loading">
+                                        <div class="px-4 py-6 text-center">
+                                            <p class="text-xs" style="color:#71717a;">Cargando alertas…</p>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="total > 0">
+                                        <ul style="list-style:none;margin:0;padding:0;">
+                                            <template x-for="item in items" :key="item.id + '-' + item.type">
+                                                <li :style="'padding:0.7rem 1rem;border-top:1px solid #27272a;border-left:' + (item.severity === 'critical' ? '3px solid #ef4444' : '3px solid #f59e0b') + ';'">
+                                                    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.5rem;">
+                                                        <div style="min-width:0;flex:1 1 0%;">
+                                                            <div style="display:flex;align-items:center;gap:0.4rem;">
+                                                                <span :style="'display:inline-block;padding:0.05rem 0.4rem;border-radius:0.25rem;font-size:0.5625rem;font-weight:700;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;' + (item.severity === 'critical' ? 'background-color:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.35);' : 'background-color:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.35);')" x-text="item.severity === 'critical' ? 'CRÍTICO' : 'AVISO'"></span>
+                                                                <span style="font-size:0.8125rem;font-weight:700;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" x-text="item.name"></span>
+                                                            </div>
+                                                            <div style="margin-top:0.2rem;font-size:0.625rem;color:#a1a1aa;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;" x-text="item.status"></div>
+                                                            <div style="margin-top:0.1rem;font-size:0.625rem;color:#71717a;">
+                                                                <span x-text="item.kind_label"></span>
+                                                                <span> · </span>
+                                                                <span x-text="item.server_name"></span>
+                                                                <template x-if="item.project_name">
+                                                                    <span>
+                                                                        <span> · </span>
+                                                                        <span x-text="item.project_name"></span>
+                                                                    </span>
+                                                                </template>
+                                                            </div>
+                                                        </div>
+                                                        <a :href="item.url" wire:navigate
+                                                           style="display:inline-block;padding:0.2rem 0.5rem;font-size:0.625rem;font-weight:600;border-radius:0.25rem;background-color:rgba(139,92,246,0.12);color:#c4b5fd;border:1px solid rgba(139,92,246,0.3);text-decoration:none;flex-shrink:0;">
+                                                            Abrir
+                                                        </a>
+                                                    </div>
+                                                </li>
+                                            </template>
+                                        </ul>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div
+                            style="position:relative;"
                             x-data="compressionTasksPanel()"
                             x-init="init()"
                             @keydown.window.escape="open = false"
@@ -495,197 +616,8 @@
                                 };
                             };
                         </script>
+                        </div> {{-- /flex wrapper for the two topbar dropdowns --}}
 
-                        {{-- Alerts bell dropdown. Sibling of the
-                             compression tasks button, anchored at
-                             right:0 so it ends up to the RIGHT of
-                             tasks (which was shifted to
-                             right:4.5rem above). Same Alpine
-                             polling pattern as compression tasks:
-                             30s closed, 10s open, fetch() against
-                             /monitor/alerts.json. Entirely hidden
-                             for client users — they do not see
-                             the /monitor page and have no use for
-                             a global alerts view.
-
-                             Every style attribute here is INLINE
-                             on purpose so the button renders
-                             correctly even if Tailwind's compiled
-                             bundle is stale on the server. See
-                             the compression tasks block above
-                             for the full rationale. --}}
-                        <div
-                            class="z-40"
-                            style="position:absolute;right:0;top:0;"
-                            x-data="alertsBellPanel()"
-                            x-init="init()"
-                            @keydown.window.escape="open = false"
-                        >
-                            <div style="position:relative;" @click.outside="open = false">
-                                <button
-                                    type="button"
-                                    @click="open = !open; if (open) { refresh(); }"
-                                    :style="buttonStyle()"
-                                    :title="buttonTitle()"
-                                    class="rounded text-xs font-semibold shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-offset-1"
-                                >
-                                    {{-- Bell icon --}}
-                                    <svg width="14" height="14" style="width:14px;height:14px;flex-shrink:0;display:block;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 00-4-5.7V5a2 2 0 10-4 0v.3A6 6 0 006 11v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 11-6 0"/>
-                                    </svg>
-                                    <span x-text="buttonLabel()"></span>
-                                    {{-- Mini red dot when critical count > 0 --}}
-                                    <span x-show="criticalCount > 0" x-cloak style="display:inline-block;width:0.375rem;height:0.375rem;border-radius:9999px;background-color:#ef4444;animation:ct-pulse 2s ease-in-out infinite;"></span>
-                                </button>
-
-                                <div
-                                    x-show="open"
-                                    x-cloak
-                                    x-transition:enter="transition ease-out duration-150"
-                                    x-transition:enter-start="opacity-0 scale-95 -translate-y-1"
-                                    x-transition:enter-end="opacity-100 scale-100 translate-y-0"
-                                    x-transition:leave="transition ease-in duration-100"
-                                    x-transition:leave-start="opacity-100 scale-100 translate-y-0"
-                                    x-transition:leave-end="opacity-0 scale-95 -translate-y-1"
-                                    class="rounded-lg border shadow-2xl"
-                                    style="position:absolute;right:0;top:calc(100% + 0.5rem);width:26rem;max-width:calc(100vw - 2rem);max-height:30rem;overflow:auto;background-color:#18181b;border-color:#27272a;color:#e4e4e7;"
-                                >
-                                    <div class="flex items-center justify-between gap-2 border-b px-4 py-3" style="border-color:#27272a;">
-                                        <div class="min-w-0">
-                                            <h4 class="text-sm font-semibold" style="color:#ffffff;">Alertas del sistema</h4>
-                                            <p class="mt-0.5 text-[11px]" style="color:#71717a;">
-                                                <span x-show="criticalCount > 0" x-cloak><span style="color:#f87171;font-weight:600;" x-text="criticalCount"></span> críticas · </span>
-                                                <span x-show="warningCount > 0" x-cloak><span style="color:#fbbf24;font-weight:600;" x-text="warningCount"></span> advertencias · </span>
-                                                actualización cada 10s
-                                            </p>
-                                        </div>
-                                        <a href="/monitor" wire:navigate
-                                           style="display:inline-block;padding:0.25rem 0.6rem;font-size:0.6875rem;font-weight:600;border-radius:0.25rem;background-color:rgba(139,92,246,0.15);color:#c4b5fd;border:1px solid rgba(139,92,246,0.35);text-decoration:none;">
-                                            Ver monitor
-                                        </a>
-                                    </div>
-
-                                    {{-- Empty state --}}
-                                    <template x-if="total === 0 && !loading">
-                                        <div class="flex flex-col items-center justify-center px-4 py-10 text-center">
-                                            <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="width:40px;height:40px;margin-bottom:0.5rem;color:#22c55e;display:block;">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                                            </svg>
-                                            <p class="text-sm" style="color:#a1a1aa;">Todo funcionando correctamente</p>
-                                            <p class="mt-0.5 text-[11px]" style="color:#52525b;">No hay recursos con problemas en este momento.</p>
-                                        </div>
-                                    </template>
-
-                                    {{-- Loading state --}}
-                                    <template x-if="total === 0 && loading">
-                                        <div class="px-4 py-6 text-center">
-                                            <p class="text-xs" style="color:#71717a;">Cargando alertas…</p>
-                                        </div>
-                                    </template>
-
-                                    {{-- Alerts list --}}
-                                    <template x-if="total > 0">
-                                        <ul style="list-style:none;margin:0;padding:0;">
-                                            <template x-for="item in items" :key="item.id + '-' + item.type">
-                                                <li :style="'padding:0.7rem 1rem;border-top:1px solid #27272a;border-left:' + (item.severity === 'critical' ? '3px solid #ef4444' : '3px solid #f59e0b') + ';'">
-                                                    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.5rem;">
-                                                        <div style="min-width:0;flex:1 1 0%;">
-                                                            <div style="display:flex;align-items:center;gap:0.4rem;">
-                                                                <span :style="'display:inline-block;padding:0.05rem 0.4rem;border-radius:0.25rem;font-size:0.5625rem;font-weight:700;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;' + (item.severity === 'critical' ? 'background-color:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.35);' : 'background-color:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.35);')" x-text="item.severity === 'critical' ? 'CRÍTICO' : 'AVISO'"></span>
-                                                                <span style="font-size:0.8125rem;font-weight:700;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" x-text="item.name"></span>
-                                                            </div>
-                                                            <div style="margin-top:0.2rem;font-size:0.625rem;color:#a1a1aa;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;" x-text="item.status"></div>
-                                                            <div style="margin-top:0.1rem;font-size:0.625rem;color:#71717a;">
-                                                                <span x-text="item.kind_label"></span>
-                                                                <span> · </span>
-                                                                <span x-text="item.server_name"></span>
-                                                                <template x-if="item.project_name">
-                                                                    <span>
-                                                                        <span> · </span>
-                                                                        <span x-text="item.project_name"></span>
-                                                                    </span>
-                                                                </template>
-                                                            </div>
-                                                        </div>
-                                                        <a :href="item.url" wire:navigate
-                                                           style="display:inline-block;padding:0.2rem 0.5rem;font-size:0.625rem;font-weight:600;border-radius:0.25rem;background-color:rgba(139,92,246,0.12);color:#c4b5fd;border:1px solid rgba(139,92,246,0.3);text-decoration:none;flex-shrink:0;">
-                                                            Abrir
-                                                        </a>
-                                                    </div>
-                                                </li>
-                                            </template>
-                                        </ul>
-                                    </template>
-                                </div>
-                            </div>
-                        </div>
-
-                        <script>
-                            window.alertsBellPanel = window.alertsBellPanel || function () {
-                                return {
-                                    open: false,
-                                    loading: false,
-                                    total: 0,
-                                    criticalCount: 0,
-                                    warningCount: 0,
-                                    items: [],
-                                    pollHandle: null,
-                                    init() {
-                                        this.refresh();
-                                        this.schedulePoll();
-                                    },
-                                    schedulePoll() {
-                                        if (this.pollHandle) {
-                                            clearInterval(this.pollHandle);
-                                        }
-                                        const interval = this.open ? 10000 : 30000;
-                                        this.pollHandle = setInterval(() => this.refresh(true), interval);
-                                    },
-                                    async refresh(silent = false) {
-                                        if (!silent) {
-                                            this.loading = true;
-                                        }
-                                        try {
-                                            const res = await fetch('{{ route('monitor.alerts') }}', {
-                                                method: 'GET',
-                                                headers: { 'Accept': 'application/json' },
-                                                credentials: 'same-origin',
-                                            });
-                                            if (!res.ok) return;
-                                            const payload = await res.json();
-                                            this.total = Number(payload.total || 0);
-                                            this.criticalCount = Number(payload.critical || 0);
-                                            this.warningCount = Number(payload.warning || 0);
-                                            this.items = Array.isArray(payload.items) ? payload.items : [];
-                                            this.schedulePoll();
-                                        } catch (e) {
-                                            // ignore
-                                        } finally {
-                                            this.loading = false;
-                                        }
-                                    },
-                                    buttonLabel() {
-                                        if (this.total === 0) return 'Alertas';
-                                        return `${this.total} ${this.total === 1 ? 'alerta' : 'alertas'}`;
-                                    },
-                                    buttonTitle() {
-                                        if (this.criticalCount > 0) return `${this.criticalCount} alertas críticas. Haz clic para ver detalles.`;
-                                        if (this.warningCount > 0) return `${this.warningCount} avisos.`;
-                                        return 'Alertas del sistema — todo OK';
-                                    },
-                                    buttonStyle() {
-                                        const base = 'display:inline-flex;align-items:center;gap:0.4rem;padding:0.35rem 0.65rem;border-radius:0.375rem;font-size:0.75rem;line-height:1;border-width:1px;border-style:solid;transition:background-color 0.15s ease,border-color 0.15s ease;';
-                                        if (this.criticalCount > 0) {
-                                            return base + 'background-color:rgba(239,68,68,0.18);color:#fca5a5;border-color:rgba(239,68,68,0.5);animation:ct-pulse 2s ease-in-out infinite;';
-                                        }
-                                        if (this.warningCount > 0) {
-                                            return base + 'background-color:rgba(245,158,11,0.18);color:#fbbf24;border-color:rgba(245,158,11,0.5);';
-                                        }
-                                        return base + 'background-color:#18181b;color:#a1a1aa;border-color:#27272a;';
-                                    },
-                                };
-                            };
-                        </script>
                         @endif
                         {{ $slot }}
                     </div>
