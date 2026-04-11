@@ -1251,8 +1251,20 @@ services:
       - SERVICE_GITHUB_REPO_URL=$SERVICE_GITHUB_REPO_URL
       - SERVICE_GITHUB_BRANCH=$SERVICE_GITHUB_BRANCH
       - SERVICE_PHP_VERSION=$SERVICE_PHP_VERSION
-      - SERVICE_FQDN_NGINX
-      - SERVICE_FQDN_NGINX_80
+      # Read the nginx FQDN as INTERPOLATED values, NOT as bare
+      # SERVICE_FQDN_NGINX declarations. The bare form is the
+      # magic Coolify token that registers a public FQDN row in
+      # the UI for whichever service contains the line, and when
+      # it sat on the laravel block (which is just php-fpm and
+      # serves no HTTP) the UI rendered a ghost sslip.io URL on
+      # the laravel service that always returned 502/404. By
+      # consuming the value via ${SERVICE_FQDN_NGINX} we still
+      # get the env var inside the laravel container so the
+      # entrypoint can write APP_URL into the Laravel .env, but
+      # Coolify treats it as a normal env interpolation and does
+      # not attach a second FQDN to the laravel row.
+      - SERVICE_FQDN_NGINX=${SERVICE_FQDN_NGINX:-}
+      - SERVICE_FQDN_NGINX_80=${SERVICE_FQDN_NGINX_80:-}
       - APP_NAME=Laravel RootKit
       - APP_ENV=${SERVICE_LARAVEL_APP_ENV:-production}
       - APP_DEBUG=${SERVICE_LARAVEL_APP_DEBUG:-false}
@@ -1284,6 +1296,20 @@ services:
   nginx:
     image: nginx:alpine
     command: ["nginx", "-g", "daemon off;"]
+    # The bare SERVICE_FQDN_NGINX declaration lives here, on the
+    # service that actually serves HTTP. Coolify reads this as
+    # "this stack wants a public FQDN that maps to the nginx
+    # service" and registers a single FQDN entry against the
+    # nginx row in the UI. Other services in the stack (laravel)
+    # then receive the value via ${SERVICE_FQDN_NGINX} interpolation
+    # in their own environment block, NOT via a second bare
+    # declaration — declaring it twice was the cause of the
+    # ghost "Bad Gateway" URL appearing on the laravel service
+    # in the Coolify UI even though laravel is just php-fpm and
+    # never serves HTTP.
+    environment:
+      - SERVICE_FQDN_NGINX
+      - SERVICE_FQDN_NGINX_80
     volumes:
       - laravel-files:/var/www/html:ro
       - type: bind
