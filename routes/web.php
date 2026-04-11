@@ -363,6 +363,24 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('service-backups.download')
         ->where('id', '[0-9]+');
 
+    // Monitor — per-Coolify-install "mini NOC" page showing live
+    // server health, resource status across every server the
+    // install manages, and inline restart/redeploy/stop actions.
+    // Admin-only: clients never see the menu entry and the
+    // Livewire mount() additionally aborts with 404 if a client
+    // types the URL manually.
+    Route::get('/monitor', \App\Livewire\Monitor\Index::class)
+        ->name('monitor.index')
+        ->middleware('restrict.client');
+
+    // JSON endpoint consumed by the topbar alerts bell. Polled
+    // every 30s closed / 10s open by the Alpine component in
+    // layouts/app.blade.php. restrict.client keeps clients out —
+    // the bell itself is hidden from them in the layout.
+    Route::get('/monitor/alerts.json', \App\Http\Controllers\MonitorAlertsController::class)
+        ->name('monitor.alerts')
+        ->middleware('restrict.client');
+
     Route::prefix('server/{server_uuid}')->middleware('restrict.client')->group(function () {
         Route::get('/', ServerShow::class)->name('server.show');
         Route::get('/advanced', ServerAdvanced::class)->name('server.advanced');

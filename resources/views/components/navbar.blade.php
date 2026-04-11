@@ -127,6 +127,26 @@
                             <span class="menu-item-label">Dashboard</span>
                         </a>
                     </li>
+                    {{-- Monitor: live per-server metrics + resource
+                         list with inline actions. Sits directly
+                         under Dashboard as a "go-here-first when
+                         something is on fire" entry. Admin-only at
+                         the route layer (restrict.client) AND here
+                         in the sidebar (same @if as every other
+                         admin menu below). --}}
+                    @if (! auth()->user()->isClient())
+                    <li>
+                        <a title="Monitor" href="/monitor" {{ wireNavigate() }}
+                            class="{{ request()->is('monitor*') ? 'menu-item-active menu-item' : 'menu-item' }}">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="menu-item-icon" viewBox="0 0 24 24"
+                                fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                                stroke-linejoin="round">
+                                <path d="M3 12h3l3 -9l6 18l3 -9h3" />
+                            </svg>
+                            <span class="menu-item-label">Monitor</span>
+                        </a>
+                    </li>
+                    @endif
                     @if (! auth()->user()->isClient())
                     <li>
                         <a title="Projects" {{ wireNavigate() }}
