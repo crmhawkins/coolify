@@ -3836,155 +3836,18 @@ class FileExplorer extends Component
 
     public function refreshCompressionTasks(): void
     {
-        $this->loadCompressionTasksFromCache();
-
-        $updatedTasks = collect($this->compressionTasks)->map(function ($task) {
-            if (! is_array($task)) {
-                return $task;
-            }
-            if (($task['status'] ?? '') !== 'running') {
-                return $task;
-            }
-
-            $containerName = (string) data_get($task, 'container', '');
-            $serverId = data_get($task, 'server_id');
-            $server = is_numeric($serverId) ? Server::find((int) $serverId) : null;
-            if (! $server instanceof Server || $containerName === '') {
-                $task['status'] = 'failed';
-                $task['last_message'] = 'Server or container context no longer available.';
-
-                return $task;
-            }
-
-            $escapedContainer = escapeshellarg($containerName);
-            // task_type distinguishes compression ("did the archive
-            // file appear on disk?") from extraction ("did the log
-            // print EXTRACTION_SUCCESS?"). Old tasks written before
-            // this refactor default to "compression" so existing
-            // cached rows keep behaving the same way.
-            $taskType = (string) data_get($task, 'task_type', 'compression');
-            $pid = data_get($task, 'pid');
-            if (is_int($pid) && $pid > 0) {
-                $runningCheck = "docker exec {$escapedContainer} sh -c 'kill -0 {$pid} >/dev/null 2>&1 && echo RUNNING || echo DONE'";
-                if ($server->isNonRoot()) {
-                    $runningCheck = "sudo {$runningCheck}";
-                }
-                $runningResult = trim((string) (instant_remote_process([$runningCheck], $server, false) ?? ''));
-                if ($runningResult === 'RUNNING') {
-                    // While running, for extraction tasks we tail
-                    // the last line of the log so the dropdown shows
-                    // live progress ("Extracted 12000/45000 files").
-                    if ($taskType === 'extraction') {
-                        $logFile = (string) data_get($task, 'log_file', '');
-                        if ($logFile !== '') {
-                            $escapedLog = escapeshellarg($logFile);
-                            $tailCommand = "docker exec {$escapedContainer} sh -c 'tail -n 1 {$escapedLog} 2>/dev/null'";
-                            if ($server->isNonRoot()) {
-                                $tailCommand = "sudo {$tailCommand}";
-                            }
-                            $liveTail = trim((string) (instant_remote_process([$tailCommand], $server, false) ?? ''));
-                            $task['last_message'] = $liveTail !== '' ? 'Extrayendo: '.mb_substr($liveTail, 0, 240) : 'Extrayendo…';
-
-                            return $task;
-                        }
-                    }
-                    $task['last_message'] = 'Running...';
-
-                    return $task;
-                }
-            }
-
-            // Completion detection branches by task type.
-            if ($taskType === 'extraction') {
-                $logFile = (string) data_get($task, 'log_file', '');
-                if ($logFile !== '') {
-                    $escapedLog = escapeshellarg($logFile);
-                    $tailCommand = "docker exec {$escapedContainer} sh -c 'tail -n 50 {$escapedLog} 2>/dev/null'";
-                    if ($server->isNonRoot()) {
-                        $tailCommand = "sudo {$tailCommand}";
-                    }
-                    $tailOutput = trim((string) (instant_remote_process([$tailCommand], $server, false) ?? ''));
-
-                    if (str_contains($tailOutput, 'EXTRACTION_SUCCESS')) {
-                        $task['status'] = 'completed';
-                        $task['last_message'] = 'Archivo extraído correctamente.';
-
-                        // Best-effort cleanup of the temp log. Ignore
-                        // failures — /tmp gets wiped on container
-                        // restart anyway.
-                        $cleanup = "docker exec {$escapedContainer} sh -c 'rm -f {$escapedLog} 2>/dev/null || true'";
-                        if ($server->isNonRoot()) {
-                            $cleanup = "sudo {$cleanup}";
-                        }
-                        instant_remote_process([$cleanup], $server, false);
-
-                        return $task;
-                    }
-
-                    if (str_contains($tailOutput, 'TOOL_NOT_FOUND:')) {
-                        $task['status'] = 'failed';
-                        $task['last_message'] = 'La herramienta requerida no está en el contenedor (unzip/tar). Instálala manualmente o extrae desde la terminal.';
-
-                        return $task;
-                    }
-
-                    if (str_contains($tailOutput, 'EXTRACTION_FAILED')) {
-                        $task['status'] = 'failed';
-                        $task['last_message'] = $tailOutput !== '' ? 'Extracción fallida: '.mb_substr($tailOutput, 0, 300) : 'Extracción fallida (sin detalles).';
-
-                        return $task;
-                    }
-
-                    $task['status'] = 'failed';
-                    $task['last_message'] = $tailOutput !== '' ? 'Extracción terminó sin marcador de éxito: '.mb_substr($tailOutput, 0, 300) : 'Extracción terminó sin output.';
-
-                    return $task;
-                }
-
-                $task['status'] = 'failed';
-                $task['last_message'] = 'Extracción terminó sin log.';
-
-                return $task;
-            }
-
-            $archivePath = (string) data_get($task, 'archive_path', '');
-            if ($archivePath !== '') {
-                $escapedArchive = escapeshellarg($archivePath);
-                $existsCheck = "docker exec {$escapedContainer} sh -c 'test -f {$escapedArchive} && echo EXISTS || echo MISSING'";
-                if ($server->isNonRoot()) {
-                    $existsCheck = "sudo {$existsCheck}";
-                }
-                $existsResult = trim((string) (instant_remote_process([$existsCheck], $server, false) ?? ''));
-                if ($existsResult === 'EXISTS') {
-                    $task['status'] = 'completed';
-                    $task['last_message'] = 'Archive created successfully.';
-
-                    return $task;
-                }
-            }
-
-            $logFile = (string) data_get($task, 'log_file', '');
-            if ($logFile !== '') {
-                $escapedLog = escapeshellarg($logFile);
-                $tailCommand = "docker exec {$escapedContainer} sh -c 'tail -n 20 {$escapedLog} 2>/dev/null'";
-                if ($server->isNonRoot()) {
-                    $tailCommand = "sudo {$tailCommand}";
-                }
-                $tailOutput = trim((string) (instant_remote_process([$tailCommand], $server, false) ?? ''));
-                $task['status'] = 'failed';
-                $task['last_message'] = $tailOutput !== '' ? mb_substr($tailOutput, 0, 300) : 'Compression finished without creating archive.';
-
-                return $task;
-            }
-
-            $task['status'] = 'failed';
-            $task['last_message'] = 'Compression finished without creating archive.';
-
-            return $task;
-        })->values()->toArray();
-
-        $this->compressionTasks = $updatedTasks;
-        $this->saveCompressionTasksToCache();
+        // Delegated to FileExplorerCompressionTaskService so the
+        // exact same refresh + auto-prune logic is shared with the
+        // GET /compression-tasks polling endpoint. Before the
+        // service existed only this Livewire method ever ran the
+        // refresh, which meant the dropdown would keep showing
+        // "RUNNING" indefinitely (until F5) because the polling
+        // route returned the cache untouched. See
+        // app/Services/FileExplorerCompressionTaskService.php for
+        // the rationale and the auto-prune window.
+        $teamId = (string) data_get(auth()->user()?->currentTeam(), 'id', '0');
+        $service = app(\App\Services\FileExplorerCompressionTaskService::class);
+        $this->compressionTasks = $service->refreshFor($teamId);
     }
 
     public function openCompressionTaskLocation(string $taskId): void

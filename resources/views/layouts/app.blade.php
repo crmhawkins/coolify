@@ -239,7 +239,7 @@
                                                             </div>
                                                             <p style="margin:0.25rem 0 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.6875rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#71717a;" x-text="'📁 ' + (task.directory || '/')"></p>
                                                             <p x-show="task.last_message" x-cloak style="margin:0.25rem 0 0 0;word-break:break-word;font-size:0.6875rem;" :style="'margin:0.25rem 0 0 0;word-break:break-word;font-size:0.6875rem;color:' + (task.status === 'failed' ? '#f87171' : '#a1a1aa') + ';'" x-text="task.last_message"></p>
-                                                            <p x-show="task.created_at" x-cloak style="margin:0.25rem 0 0 0;font-size:0.625rem;color:#52525b;" x-text="relativeTime(task.created_at)"></p>
+                                                            <p x-show="task.created_at" x-cloak style="margin:0.25rem 0 0 0;font-size:0.625rem;color:#52525b;" x-text="taskTimeLabel(task)"></p>
                                                         </div>
                                                         <span :style="statusPillStyle(task)" x-text="(task.status || 'running').toUpperCase()"></span>
                                                     </div>
@@ -461,6 +461,36 @@
                                         if (diff < 3600) return `hace ${Math.floor(diff / 60)} min`;
                                         if (diff < 86400) return `hace ${Math.floor(diff / 3600)} h`;
                                         return `hace ${Math.floor(diff / 86400)} d`;
+                                    },
+                                    // Format an integer number of seconds as a
+                                    // compact "1m 23s" / "2h 5m" / "45s" label
+                                    // shown next to completed/failed tasks so
+                                    // the user can see how long an extraction
+                                    // actually took.
+                                    formatDuration(seconds) {
+                                        const s = Math.max(0, Math.round(Number(seconds) || 0));
+                                        if (s < 60) return `${s}s`;
+                                        const m = Math.floor(s / 60);
+                                        const remS = s % 60;
+                                        if (m < 60) return remS > 0 ? `${m}m ${remS}s` : `${m}m`;
+                                        const h = Math.floor(m / 60);
+                                        const remM = m % 60;
+                                        return remM > 0 ? `${h}h ${remM}m` : `${h}h`;
+                                    },
+                                    // Composite label rendered under each task
+                                    // row. RUNNING tasks show only the relative
+                                    // creation time. COMPLETED/FAILED tasks
+                                    // show "hace 3 min · duración 1m 23s" so
+                                    // the user can both date the task and see
+                                    // how long it actually ran.
+                                    taskTimeLabel(task) {
+                                        if (!task?.created_at) return '';
+                                        const rel = this.relativeTime(task.created_at);
+                                        const status = task?.status || 'running';
+                                        if (status === 'running') return rel;
+                                        const dur = task?.duration_seconds;
+                                        if (dur === null || dur === undefined || dur === '') return rel;
+                                        return `${rel} · duración ${this.formatDuration(dur)}`;
                                     },
                                 };
                             };

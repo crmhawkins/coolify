@@ -582,12 +582,21 @@ Route::middleware(['auth'])->group(function () {
     })->name('project.file.download')->middleware('can.access.terminal');
 
     Route::get('/compression-tasks', function () {
+        // The Alpine dropdown polls this endpoint every 4-20 s. Until
+        // we wired the service in here it just dumped the raw cache,
+        // which meant a finished extraction would still display as
+        // "RUNNING" until the user remounted the FileExplorer
+        // component (the only place that historically called the
+        // refresh logic). Now we run the same refresh + auto-prune
+        // pass on every poll so the UI converges to the real status
+        // within one polling cycle of the actual finish, and
+        // completed/failed rows fall off the list ~5 minutes later
+        // without forcing the user to hit "Limpiar listas".
         $teamId = (string) data_get(auth()->user()?->currentTeam(), 'id', '0');
-        $cacheKey = "file-explorer-compression-tasks:{$teamId}";
-        $tasks = \Illuminate\Support\Facades\Cache::get($cacheKey, []);
+        $tasks = app(\App\Services\FileExplorerCompressionTaskService::class)->refreshFor($teamId);
 
         return response()->json([
-            'tasks' => is_array($tasks) ? $tasks : [],
+            'tasks' => $tasks,
         ]);
     })->name('compression.tasks');
 
