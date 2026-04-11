@@ -22,11 +22,15 @@
                 </div>
             </a>
             @if (!$application->destination->server->isSwarm())
+                {{-- Terminal: admin/owner only (canAccessTerminal) --}}
                 @can('canAccessTerminal')
                     <a class="{{ request()->routeIs('project.application.command') ? 'dark:text-white' : '' }}"
                         href="{{ route('project.application.command', $parameters) }}">
                         Terminal
                     </a>
+                @endcan
+                {{-- Files: admin/owner/client (canAccessFileExplorer) --}}
+                @can('canAccessFileExplorer')
                     <a class="{{ request()->routeIs('project.application.files') ? 'dark:text-white' : '' }}"
                         href="{{ route('project.application.files', $parameters) }}">
                         Files

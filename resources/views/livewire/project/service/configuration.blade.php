@@ -210,7 +210,12 @@
                                         Settings
                                     </a>
                                     @if (str($database->status)->contains('running'))
-                                        @can('canAccessTerminal')
+                                        {{-- Database Panel opens the Files view on the database container,
+                                             so it is gated by the broader canAccessFileExplorer gate (the
+                                             same one the route itself now uses) instead of the terminal
+                                             gate — clients need it to reach phpMyAdmin-style management
+                                             of their own sites. --}}
+                                        @can('canAccessFileExplorer')
                                             <a href="{{ route('project.service.files', ['project_uuid' => $project->uuid, 'environment_uuid' => $environment->uuid, 'service_uuid' => $service->uuid]) }}"
                                                 class="button bg-green-600">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

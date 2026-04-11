@@ -88,7 +88,29 @@ class AuthServiceProvider extends ServiceProvider
         // container). That route is additionally guarded with
         // restrict.client middleware in routes/web.php so clients can
         // never SSH into a server.
+        // Terminal access is INTENTIONALLY admin/owner only.
+        // The terminal lets you run arbitrary commands inside a
+        // container, which is too powerful for a scoped client
+        // role. Clients used to be in this list but they do not
+        // need it in practice — they manage their sites through
+        // the dedicated per-service tabs (Backup y descarga,
+        // WordPress Manager, Files), not via a raw shell.
         Gate::define('canAccessTerminal', function ($user) {
+            return $user->isAdmin() || $user->isOwner();
+        });
+
+        // File Explorer access is the broader gate — admin,
+        // owner AND client. Clients need this to upload/download
+        // files and to generate downloadable service backups.
+        // The existing RestrictsToClientProjects global scope
+        // prevents them from reaching a container outside their
+        // assigned projects: if a client types the URL of a
+        // service in a project they don't have, the Service
+        // lookup inside FileExplorer::mount() raises 404 via
+        // ->firstOrFail(). So no defense is lost by opening this
+        // gate to the client role — the scope is still doing the
+        // heavy lifting downstream.
+        Gate::define('canAccessFileExplorer', function ($user) {
             return $user->isAdmin() || $user->isOwner() || (method_exists($user, 'isClient') && $user->isClient());
         });
     }

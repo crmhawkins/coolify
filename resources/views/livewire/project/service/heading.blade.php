@@ -18,11 +18,20 @@
                 href="{{ route('project.service.logs', $parameters) }}">
                 <button>Logs</button>
             </a>
+            {{-- Terminal is gated by canAccessTerminal (admin +
+                 owner only). Clients never see this button — see
+                 AuthServiceProvider::canAccessTerminal. --}}
             @can('canAccessTerminal')
                 <a class="{{ request()->routeIs('project.service.command') ? 'dark:text-white' : '' }}"
                     href="{{ route('project.service.command', $parameters) }}">
                     <button>Terminal</button>
                 </a>
+            @endcan
+            {{-- Files is gated by the broader canAccessFileExplorer
+                 (admin + owner + client). Clients use it to upload
+                 themes, download backups and extract archives for
+                 the services they have project access to. --}}
+            @can('canAccessFileExplorer')
                 <a class="{{ request()->routeIs('project.service.files') ? 'dark:text-white' : '' }}"
                     href="{{ route('project.service.files', $parameters) }}">
                     <button>Files</button>

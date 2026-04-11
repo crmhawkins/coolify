@@ -53,12 +53,70 @@ class BackupDownload extends Component
 
     public bool $hasRunning = false;
 
+    /**
+     * Team id resolved at mount time and cached on the component
+     * so subsequent click-time calls (generate, deleteRun,
+     * reloadRuns) don't have to re-derive it from a Livewire-
+     * hydrated model that may have lost its relation state.
+     *
+     * Three resolution sources in priority order:
+     *   1. Raw DB join services → environments → projects → team_id
+     *      — bypasses every Eloquent global scope.
+     *   2. The parent Service model's environment.project.team_id
+     *      walked via data_get (works when mount() is called with
+     *      a freshly route-model-bound service).
+     *   3. currentTeam()->id from the session (works for admin
+     *      but often null for a fresh client that never switched
+     *      teams explicitly).
+     *
+     * If all three fail, the error toast includes diagnostic
+     * values so we can see which path returned nothing.
+     */
+    public int $resolvedTeamId = 0;
+
     public function mount(Service $service): void
     {
         $this->service = $service;
         $this->available = $this->serviceIsWordPress($service);
+        $this->resolvedTeamId = $this->resolveTeamIdFor($service);
 
         $this->reloadRuns();
+    }
+
+    /**
+     * Try each of the three team_id sources in order and return
+     * the first non-zero value. Isolated into its own method so
+     * mount() and generate() can both call it — generate() calls
+     * it as a safety net in case $resolvedTeamId was serialized
+     * back as 0 through a Livewire round trip.
+     */
+    private function resolveTeamIdFor(?Service $service): int
+    {
+        $svcId = (int) ($service?->id ?? 0);
+
+        // Source 1: raw DB join, bypasses every global scope
+        if ($svcId > 0) {
+            $viaJoin = DB::table('services')
+                ->join('environments', 'services.environment_id', '=', 'environments.id')
+                ->join('projects', 'environments.project_id', '=', 'projects.id')
+                ->where('services.id', $svcId)
+                ->value('projects.team_id');
+            if ($viaJoin !== null && (int) $viaJoin > 0) {
+                return (int) $viaJoin;
+            }
+        }
+
+        // Source 2: walk the Eloquent relation on the instance we
+        // got in mount(). Freshly route-model-bound services
+        // usually have environment loaded implicitly because the
+        // parent Configuration component eager-loads it.
+        $viaRelation = (int) (data_get($service, 'environment.project.team_id') ?? 0);
+        if ($viaRelation > 0) {
+            return $viaRelation;
+        }
+
+        // Source 3: current session team
+        return (int) (currentTeam()?->id ?? 0);
     }
 
     public function render()
@@ -97,41 +155,30 @@ class BackupDownload extends Component
             return;
         }
 
-        // Resolve team_id via a raw DB query that bypasses
-        // every Eloquent global scope. Service, Environment AND
-        // Project all mix in RestrictsToClientProjects, which adds
-        // a whereHas/whereIn restriction by the
-        // project_user pivot when the authenticated user is a
-        // client. For the eager-load `with('environment.project')`
-        // path, the Project scope fires on the SEPARATE eager load
-        // query, and when the memoized projectIdsCache has not yet
-        // been warmed for the current request (fresh client user,
-        // first click of the Generar button) the relation returns
-        // null and data_get() collapses the whole chain.
-        //
-        // Going direct at the DB with the join sidesteps all of
-        // that. The row is guaranteed to exist (the Livewire
-        // component is already mounted for this service id, which
-        // means Configuration::mount already authorized access
-        // via currentTeam()->projects()), so this read always has
-        // a value unless the service was deleted in between the
-        // mount and the button click.
-        $teamId = (int) (DB::table('services')
-            ->join('environments', 'services.environment_id', '=', 'environments.id')
-            ->join('projects', 'environments.project_id', '=', 'projects.id')
-            ->where('services.id', $this->service->id)
-            ->value('projects.team_id') ?? 0);
+        // Use the team id we resolved at mount time. If for some
+        // weird Livewire hydration reason that came back as 0,
+        // re-run the resolver here one more time.
+        $teamId = $this->resolvedTeamId > 0
+            ? $this->resolvedTeamId
+            : $this->resolveTeamIdFor($this->service);
+
         if ($teamId === 0) {
-            // Extra fallback: try the auth session. If even this
-            // is null, something is really broken and the user
-            // sees a clear toast.
-            $teamId = (int) (currentTeam()?->id ?? 0);
-        }
-        if ($teamId === 0) {
-            $this->dispatch('error', 'No se pudo determinar el equipo de este servicio.');
+            // Include the values we actually saw so if this ever
+            // fires again we can see which source returned
+            // nothing. The toast text is Spanish but the debug
+            // suffix is intentionally left in English so the user
+            // can paste it verbatim in a bug report.
+            $svcId = (int) ($this->service?->id ?? 0);
+            $svcUuid = (string) ($this->service?->uuid ?? '');
+            $this->dispatch('error', "No se pudo determinar el equipo de este servicio. [svc_id={$svcId} uuid={$svcUuid}]");
 
             return;
         }
+
+        // Cache the freshly resolved value so subsequent clicks
+        // (deleteRun, or a retry after a transient network
+        // hiccup) don't pay the DB join twice.
+        $this->resolvedTeamId = $teamId;
 
         $run = ServiceBackupRun::create([
             'service_id' => $this->service->id,

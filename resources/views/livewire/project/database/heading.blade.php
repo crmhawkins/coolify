@@ -20,11 +20,15 @@
                 href="{{ route('project.database.logs', $parameters) }}">
                 Logs
             </a>
+            {{-- Terminal: admin/owner only (canAccessTerminal) --}}
             @can('canAccessTerminal')
                 <a class="{{ request()->routeIs('project.database.command') ? 'dark:text-white' : '' }}"
                     href="{{ route('project.database.command', $parameters) }}">
                     Terminal
                 </a>
+            @endcan
+            {{-- Files: admin/owner/client (canAccessFileExplorer) --}}
+            @can('canAccessFileExplorer')
                 <a class="{{ request()->routeIs('project.database.files') ? 'dark:text-white' : '' }}"
                     href="{{ route('project.database.files', $parameters) }}">
                     Files
