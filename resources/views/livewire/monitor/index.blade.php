@@ -352,7 +352,12 @@
                                 </span>
                             </td>
                             <td style="padding:0.55rem 0.75rem;vertical-align:middle;">
-                                <a href="{{ $r['url'] }}" wire:navigate style="color:#ffffff;font-weight:600;text-decoration:none;">{{ $r['name'] }}</a>
+                                {{-- Name link opens in a new tab so the
+                                     operator never loses the Monitor
+                                     page as their "situation room"
+                                     view while drilling into one
+                                     specific resource. --}}
+                                <a href="{{ $r['url'] }}" target="_blank" rel="noopener noreferrer" style="color:#ffffff;font-weight:600;text-decoration:none;">{{ $r['name'] }}</a>
                                 @if ($r['project_name'])
                                     <div style="font-size:0.625rem;color:#71717a;margin-top:0.1rem;">{{ $r['project_name'] }} / {{ $r['environment_name'] }}</div>
                                 @endif
@@ -376,8 +381,11 @@
                                      name). Ver web only renders
                                      when there is a real fqdn, and
                                      opens in a new tab. --}}
-                                <a href="{{ $r['url'] }}" wire:navigate
-                                    title="Abrir configuración"
+                                {{-- Opens in a new tab so the Monitor
+                                     page stays pinned as the operator
+                                     drills into a single resource. --}}
+                                <a href="{{ $r['url'] }}" target="_blank" rel="noopener noreferrer"
+                                    title="Abrir configuración en una pestaña nueva"
                                     style="display:inline-block;padding:0.25rem 0.5rem;font-size:0.625rem;font-weight:700;border-radius:0.25rem;border:1px solid #3f3f46;background-color:#18181b;color:#a1a1aa;cursor:pointer;text-decoration:none;">
                                     ↗ Abrir
                                 </a>

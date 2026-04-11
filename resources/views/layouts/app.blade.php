@@ -217,9 +217,10 @@
                                                                 </template>
                                                             </div>
                                                         </div>
-                                                        <a :href="item.url" wire:navigate
+                                                        <a :href="item.url" target="_blank" rel="noopener noreferrer"
+                                                           title="Abrir en pestaña nueva"
                                                            style="display:inline-block;padding:0.2rem 0.5rem;font-size:0.625rem;font-weight:600;border-radius:0.25rem;background-color:rgba(139,92,246,0.12);color:#c4b5fd;border:1px solid rgba(139,92,246,0.3);text-decoration:none;flex-shrink:0;">
-                                                            Abrir
+                                                            Abrir ↗
                                                         </a>
                                                     </div>
                                                 </li>
