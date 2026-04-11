@@ -140,6 +140,7 @@ class MonitorResourceAggregator
             'last_online_at' => $lastIso,
             'last_online_human' => $lastHuman,
             'url' => $this->applicationUrl($app),
+            'web_url' => $this->firstFqdnUrl((string) ($app->fqdn ?? '')),
             'is_stopped' => str_contains($status, 'exited'),
         ];
     }
@@ -168,6 +169,9 @@ class MonitorResourceAggregator
             'last_online_at' => $lastIso,
             'last_online_human' => $lastHuman,
             'url' => $this->databaseUrl($db),
+            // Databases have no public URL — the "Ver web"
+            // button is hidden for them in the view.
+            'web_url' => null,
             'is_stopped' => str_contains($status, 'exited'),
         ];
     }
@@ -207,6 +211,22 @@ class MonitorResourceAggregator
         $status = (string) ($svc->status ?? 'exited');
         $severity = self::severityOf($status);
 
+        // Services don't own a top-level fqdn — each
+        // ServiceApplication inside the compose stack can have
+        // its own. Pick the first ServiceApplication with a
+        // non-empty fqdn so the "Ver web" button lands on the
+        // visible site (mirrors the catalog UI).
+        $webUrl = null;
+        foreach ($svc->applications as $svcApp) {
+            $fqdn = (string) ($svcApp->fqdn ?? '');
+            if ($fqdn !== '') {
+                $webUrl = $this->firstFqdnUrl($fqdn);
+                if ($webUrl !== null) {
+                    break;
+                }
+            }
+        }
+
         return [
             'id' => $svc->id,
             'uuid' => (string) $svc->uuid,
@@ -222,8 +242,34 @@ class MonitorResourceAggregator
             'last_online_at' => null,
             'last_online_human' => null,
             'url' => $this->serviceUrl($svc),
+            'web_url' => $webUrl,
             'is_stopped' => str_contains($status, 'exited'),
         ];
+    }
+
+    /**
+     * Turn the `fqdn` DB column (a single URL, a comma-separated
+     * list of URLs, or bare host with no scheme) into the first
+     * usable HTTPS link for the "Ver web" button. Returns null
+     * when the value is blank or unparseable. Defaults to https
+     * to avoid mixed-content warnings when clicked from an
+     * https-served Coolify UI.
+     */
+    private function firstFqdnUrl(string $raw): ?string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return null;
+        }
+        $first = trim(explode(',', $raw)[0]);
+        if ($first === '') {
+            return null;
+        }
+        if (! str_starts_with($first, 'http://') && ! str_starts_with($first, 'https://')) {
+            return 'https://'.$first;
+        }
+
+        return $first;
     }
 
     private function applicationKindLabel(Application $app): string
