@@ -768,9 +768,33 @@ class Index extends Component
     }
 
     /**
-     * Last 10 Spatie activity_log entries related to the current
-     * team's resources. Shaped for the blade: friendly label +
-     * relative time.
+     * Last 10 Spatie activity_log entries shaped for the blade:
+     * friendly label + relative time + severity + a resolved
+     * resource name so the operator can tell WHAT the activity
+     * is actually about at a glance.
+     *
+     * The raw activity_log rows Coolify writes for deployment
+     * pipelines use the `description` column to store the
+     * FULL CoolifyTask output as a JSON-encoded array of
+     * `[{"type":"out","output":"..."}, ...]` entries. Dumping
+     * that raw into the UI (what the previous version did) was
+     * unreadable: the feed ended up showing "[{"type":"out",
+     * "output":"Creating required Docker Compose file.\nPulling
+     * docker" and cutting off mid-sentence.
+     *
+     * This rewrite:
+     *  1. Detects when description is a JSON-encoded log array
+     *     and extracts the LAST meaningful output line (the
+     *     last line is where errors and success markers land).
+     *  2. Strips escape sequences, collapses whitespace, and
+     *     cuts to ~80 chars.
+     *  3. Resolves the resource name for each row via a single
+     *     batched whereIn query per resource type (Service,
+     *     Application, standalone DBs) so the feed can show
+     *     "Findpartners WordPress: Deployment finished" instead
+     *     of an anonymous blob.
+     *  4. Picks a severity bucket from `status` so the colored
+     *     dot on the left matches what the row actually did.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -781,18 +805,49 @@ class Index extends Component
             ->limit(10)
             ->get();
 
-        return $rows->map(function (Activity $a) {
-            $status = data_get($a->properties, 'status', '');
-            $typeUuid = data_get($a->properties, 'type_uuid', '');
-            $description = (string) ($a->description ?? $a->event ?? 'actividad');
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        // Pre-load resource names by uuid in a single batched
+        // lookup per model type, so the map() below never hits
+        // the DB again. 10 rows × 7 models would otherwise be 70
+        // queries per poll.
+        $uuids = $rows->pluck('properties.type_uuid')
+            ->filter(fn ($u) => is_string($u) && $u !== '')
+            ->unique()
+            ->values()
+            ->all();
+        $resourceNames = $this->batchResolveResourceNames($uuids);
+
+        return $rows->map(function (Activity $a) use ($resourceNames) {
+            $status = (string) data_get($a->properties, 'status', '');
+            $typeUuid = (string) data_get($a->properties, 'type_uuid', '');
+            $rawDescription = (string) ($a->description ?? $a->event ?? '');
+
+            $description = $this->humaniseActivityDescription($rawDescription);
+
+            // Prepend the resolved resource name so the label
+            // reads "Findpartners: {what happened}" instead of a
+            // bare log line with no context.
+            $resourceName = $resourceNames[$typeUuid] ?? null;
+            if ($resourceName !== null && $description !== '') {
+                $label = "{$resourceName}: {$description}";
+            } elseif ($resourceName !== null) {
+                $label = $resourceName;
+            } elseif ($description !== '') {
+                $label = $description;
+            } else {
+                $label = 'Actividad sin detalle';
+            }
 
             // Defensive: Spatie's Activity model normally casts
-            // created_at to Carbon, but we have seen the fork trip
-            // on non-casted timestamps before (Application model
-            // does NOT cast last_online_at either). Carbon::parse
-            // from a raw string keeps the feed alive even if some
-            // upstream migration forgot the cast.
-            $when = null;
+            // created_at to Carbon, but the fork has been bitten
+            // by non-casted timestamps before (Application model
+            // still does NOT cast last_online_at either).
+            // Carbon::parse from a raw string keeps the feed
+            // alive even if some upstream migration forgot it.
+            $when = '';
             if ($a->created_at !== null) {
                 try {
                     $carbon = $a->created_at instanceof \DateTimeInterface
@@ -806,20 +861,132 @@ class Index extends Component
 
             return [
                 'id' => $a->id,
-                'label' => mb_substr($description, 0, 80),
-                'status' => (string) $status,
-                'target_uuid' => (string) $typeUuid,
-                'when_human' => $when ?? '',
+                'label' => mb_substr($label, 0, 120),
+                'status' => $status,
+                'target_uuid' => $typeUuid,
+                'when_human' => $when,
                 'severity' => match (true) {
-                    str_contains(strtolower((string) $status), 'error') => 'critical',
-                    str_contains(strtolower((string) $status), 'fail') => 'critical',
-                    str_contains(strtolower((string) $status), 'finish') => 'ok',
-                    str_contains(strtolower((string) $status), 'success') => 'ok',
-                    str_contains(strtolower((string) $status), 'progress') => 'warning',
+                    str_contains(strtolower($status), 'error') => 'critical',
+                    str_contains(strtolower($status), 'fail') => 'critical',
+                    str_contains(strtolower($status), 'finish') => 'ok',
+                    str_contains(strtolower($status), 'success') => 'ok',
+                    str_contains(strtolower($status), 'progress') => 'warning',
                     default => 'info',
                 },
             ];
         })->values()->all();
+    }
+
+    /**
+     * Turn a raw activity_log description — which for Coolify's
+     * CoolifyTask-driven rows is a JSON array of output entries
+     * — into a human-readable one-line label.
+     *
+     *   [{"type":"out","output":"Saved configuration files..."}]
+     *     → "Saved configuration files…"
+     *
+     * Plain-string descriptions pass through untouched (truncated).
+     * Handles malformed JSON gracefully so a corrupt row never
+     * breaks the whole feed.
+     */
+    private function humaniseActivityDescription(string $raw): string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return '';
+        }
+
+        // Detect the JSON-log shape. Every CoolifyTask row starts
+        // with `[{"` (JSON array of objects). We only try to
+        // parse when the prefix matches so a legitimate plain
+        // string like "Deployment failed" never hits json_decode.
+        if (str_starts_with($raw, '[{') || str_starts_with($raw, '[ {')) {
+            try {
+                $decoded = json_decode($raw, true, 16, JSON_THROW_ON_ERROR);
+            } catch (\Throwable $e) {
+                $decoded = null;
+            }
+            if (is_array($decoded) && ! empty($decoded)) {
+                // The LAST entry is usually the most meaningful
+                // one (error message or success marker). Fall
+                // back to the first one if the last has empty
+                // output.
+                $last = end($decoded);
+                $output = (string) data_get($last, 'output', '');
+                if ($output === '') {
+                    $first = reset($decoded);
+                    $output = (string) data_get($first, 'output', '');
+                }
+                $raw = $output;
+            }
+        }
+
+        // Normalise whitespace and escape sequences so the feed
+        // row doesn't have literal "\n" or multi-space padding.
+        $raw = str_replace(['\r\n', '\n', '\r', "\n", "\r", "\t"], ' ', $raw);
+        $raw = trim((string) preg_replace('/\s+/', ' ', $raw));
+
+        if (mb_strlen($raw) > 100) {
+            $raw = mb_substr($raw, 0, 100).'…';
+        }
+
+        return $raw;
+    }
+
+    /**
+     * Resolve a batch of uuids into a map { uuid => resourceName }
+     * with a single whereIn query per resource model. Used by
+     * loadRecentActivity() so the feed can prefix each row with
+     * the friendly name of the resource the activity targeted.
+     *
+     * @param  array<int, string>  $uuids
+     * @return array<string, string>
+     */
+    private function batchResolveResourceNames(array $uuids): array
+    {
+        if (empty($uuids)) {
+            return [];
+        }
+
+        $out = [];
+
+        $add = function ($rows) use (&$out) {
+            foreach ($rows as $row) {
+                $uuid = (string) ($row->uuid ?? '');
+                $name = (string) ($row->name ?? '');
+                if ($uuid !== '' && $name !== '') {
+                    $out[$uuid] = $name;
+                }
+            }
+        };
+
+        try {
+            $add(Service::whereIn('uuid', $uuids)->get(['uuid', 'name']));
+        } catch (\Throwable $e) {
+        }
+        try {
+            $add(Application::whereIn('uuid', $uuids)->get(['uuid', 'name']));
+        } catch (\Throwable $e) {
+        }
+        foreach ([
+            StandalonePostgresql::class,
+            StandaloneMysql::class,
+            StandaloneMariadb::class,
+            StandaloneMongodb::class,
+            StandaloneRedis::class,
+            StandaloneKeydb::class,
+            StandaloneDragonfly::class,
+            StandaloneClickhouse::class,
+        ] as $class) {
+            try {
+                $add($class::whereIn('uuid', $uuids)->get(['uuid', 'name']));
+            } catch (\Throwable $e) {
+                // A missing table or a migration not yet run on
+                // the local install just skips that class.
+            }
+        }
+
+        return $out;
     }
 
     private function findTeamServer(int $serverId): ?Server
