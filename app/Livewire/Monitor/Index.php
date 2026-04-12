@@ -823,9 +823,19 @@ class Index extends Component
         return $rows->map(function (Activity $a) use ($resourceNames) {
             $status = (string) data_get($a->properties, 'status', '');
             $typeUuid = (string) data_get($a->properties, 'type_uuid', '');
-            $rawDescription = (string) ($a->description ?? $a->event ?? '');
 
-            $description = $this->humaniseActivityDescription($rawDescription);
+            // Two separate sources: the raw description column
+            // (usually a JSON output log for CoolifyTask rows)
+            // and Spatie's log_name / event field (usually a
+            // short verb like "deployment_finished", "updated",
+            // "created"). We humanise the description; if that
+            // collapses to empty we fall back to the event name
+            // so a row never renders as an empty string.
+            $description = $this->humaniseActivityDescription((string) ($a->description ?? ''));
+            $eventLabel = $this->humaniseEventName((string) ($a->event ?? $a->log_name ?? ''));
+            if ($description === '' && $eventLabel !== '') {
+                $description = $eventLabel;
+            }
 
             // Prepend the resolved resource name so the label
             // reads "Findpartners: {what happened}" instead of a
@@ -834,9 +844,11 @@ class Index extends Component
             if ($resourceName !== null && $description !== '') {
                 $label = "{$resourceName}: {$description}";
             } elseif ($resourceName !== null) {
-                $label = $resourceName;
+                $label = $resourceName.($eventLabel !== '' ? ': '.$eventLabel : '');
             } elseif ($description !== '') {
                 $label = $description;
+            } elseif ($eventLabel !== '') {
+                $label = $eventLabel;
             } else {
                 $label = 'Actividad sin detalle';
             }
@@ -885,37 +897,56 @@ class Index extends Component
      *   [{"type":"out","output":"Saved configuration files..."}]
      *     → "Saved configuration files…"
      *
-     * Plain-string descriptions pass through untouched (truncated).
+     *   []        → empty string (nothing useful to say)
+     *   "[]"      → empty string (ditto — previous version was
+     *                 dumping the literal "[]" characters into
+     *                 the UI)
+     *   "Foo bar" → "Foo bar"        (plain string passthrough)
+     *
      * Handles malformed JSON gracefully so a corrupt row never
      * breaks the whole feed.
      */
     private function humaniseActivityDescription(string $raw): string
     {
         $raw = trim($raw);
-        if ($raw === '') {
+        if ($raw === '' || $raw === '[]' || $raw === '{}') {
             return '';
         }
 
-        // Detect the JSON-log shape. Every CoolifyTask row starts
-        // with `[{"` (JSON array of objects). We only try to
-        // parse when the prefix matches so a legitimate plain
-        // string like "Deployment failed" never hits json_decode.
-        if (str_starts_with($raw, '[{') || str_starts_with($raw, '[ {')) {
+        // Detect the JSON shape. Coolify's CoolifyTask rows
+        // store the full output log as a JSON array. The
+        // previous version only tried to parse when the raw
+        // started with `[{` which skipped `[]`, `[ ]` and rows
+        // where the JSON is valid but empty, leaving the literal
+        // brackets leaking into the UI. Now we try to parse
+        // anything that LOOKS like JSON and fall back to the
+        // cleaned plain string on failure.
+        if ($raw[0] === '[' || $raw[0] === '{') {
             try {
                 $decoded = json_decode($raw, true, 16, JSON_THROW_ON_ERROR);
             } catch (\Throwable $e) {
                 $decoded = null;
             }
-            if (is_array($decoded) && ! empty($decoded)) {
+            if (is_array($decoded)) {
+                if (empty($decoded)) {
+                    // Valid JSON but empty — e.g. a row that
+                    // completed with zero stdout lines. Nothing
+                    // meaningful to show, let the caller fall
+                    // back to just the resource name.
+                    return '';
+                }
                 // The LAST entry is usually the most meaningful
                 // one (error message or success marker). Fall
-                // back to the first one if the last has empty
-                // output.
-                $last = end($decoded);
-                $output = (string) data_get($last, 'output', '');
-                if ($output === '') {
-                    $first = reset($decoded);
-                    $output = (string) data_get($first, 'output', '');
+                // back to walking from the end until we find a
+                // non-empty output line — some pipelines write
+                // an empty trailing entry.
+                $output = '';
+                for ($i = count($decoded) - 1; $i >= 0; $i--) {
+                    $candidate = (string) data_get($decoded[$i] ?? null, 'output', '');
+                    if (trim($candidate) !== '') {
+                        $output = $candidate;
+                        break;
+                    }
                 }
                 $raw = $output;
             }
@@ -931,6 +962,44 @@ class Index extends Component
         }
 
         return $raw;
+    }
+
+    /**
+     * Turn a Spatie activity_log event/log_name column into a
+     * capitalised Spanish-friendly label. Spatie stores events
+     * as snake_case verbs like "deployment_finished", "created",
+     * "updated", "deleted" which on their own are readable but
+     * not polished. We normalise common patterns to nicer text.
+     */
+    private function humaniseEventName(string $raw): string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return '';
+        }
+
+        $map = [
+            'deployment_finished' => 'Deployment finalizado',
+            'deployment_failed' => 'Deployment fallido',
+            'deployment_started' => 'Deployment iniciado',
+            'deployment_queued' => 'Deployment encolado',
+            'created' => 'Creado',
+            'updated' => 'Actualizado',
+            'deleted' => 'Eliminado',
+            'restored' => 'Restaurado',
+            'started' => 'Iniciado',
+            'stopped' => 'Parado',
+            'restarted' => 'Reiniciado',
+        ];
+
+        $lower = strtolower($raw);
+        if (isset($map[$lower])) {
+            return $map[$lower];
+        }
+
+        // Generic fallback: replace underscores with spaces and
+        // uppercase the first letter.
+        return ucfirst(str_replace('_', ' ', $lower));
     }
 
     /**
