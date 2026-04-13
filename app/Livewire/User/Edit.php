@@ -104,13 +104,13 @@ class Edit extends Component
 
         try {
             $plainPassword = Str::password(length: 20, symbols: true);
-            $this->targetUser->password = Hash::make($plainPassword);
-            $this->targetUser->save();
 
-            // Note: we no longer delete sessions here. The user's old
-            // session will simply fail authentication on the next request
-            // because the password hash changed, forcing a natural re-login.
+            // Use query builder update to avoid model events that could
+            // interfere with the current admin session.
+            \App\Models\User::where('id', $this->targetUser->id)
+                ->update(['password' => Hash::make($plainPassword)]);
 
+            $this->targetUser->refresh();
             $this->regeneratedPassword = $plainPassword;
 
             $this->sendCredentialsEmail($this->targetUser, $plainPassword);
