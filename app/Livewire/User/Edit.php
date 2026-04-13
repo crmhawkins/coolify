@@ -107,11 +107,13 @@ class Edit extends Component
             $this->targetUser->password = Hash::make($plainPassword);
             $this->targetUser->save();
 
-            // Invalidate existing sessions for the affected user only (not the current admin session).
-            DB::table('sessions')
-                ->where('user_id', $this->targetUser->id)
-                ->where('id', '!=', session()->getId())
-                ->delete();
+            // Invalidate existing sessions for the affected user only.
+            // Skip if the admin is editing their own account.
+            if ($this->targetUser->id !== auth()->id()) {
+                DB::table('sessions')
+                    ->where('user_id', $this->targetUser->id)
+                    ->delete();
+            }
 
             $this->regeneratedPassword = $plainPassword;
 
