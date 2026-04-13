@@ -16,6 +16,10 @@ class DeploymentsIndicator extends Component
     {
         $servers = Server::ownedByCurrentTeamCached();
 
+        if ($servers === null || $servers->isEmpty()) {
+            return collect();
+        }
+
         return ApplicationDeploymentQueue::with(['application.environment.project'])
             ->whereIn('status', ['in_progress', 'queued'])
             ->whereIn('server_id', $servers->pluck('id'))
