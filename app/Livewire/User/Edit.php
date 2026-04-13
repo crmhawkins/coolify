@@ -115,7 +115,13 @@ class Edit extends Component
 
             $this->sendCredentialsEmail($this->targetUser, $plainPassword);
 
-            $this->dispatch('success', 'Contraseña regenerada.');
+            if ($this->emailError) {
+                $this->dispatch('error', $this->emailError);
+            } elseif ($this->emailSent) {
+                $this->dispatch('success', 'Contraseña regenerada y email enviado.');
+            } else {
+                $this->dispatch('success', 'Contraseña regenerada (email no enviado).');
+            }
         } catch (\Throwable $e) {
             handleError($e, $this);
         }
