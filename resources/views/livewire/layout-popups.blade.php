@@ -154,7 +154,7 @@
             </div>
         </x-banner>
     @endif
-    @if (!currentTeam()->isAnyNotificationEnabled())
+    @if (!currentTeam()->isAnyNotificationEnabled() && auth()->user()?->isAdminOrOwner())
         <span x-show="popups.notification">
             <x-popup>
                 <x-slot:title>
