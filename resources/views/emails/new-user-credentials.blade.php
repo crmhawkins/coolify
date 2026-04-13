@@ -23,7 +23,7 @@
             <td style="padding:20px 24px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#1f2937;">
                 <div style="margin-bottom:10px;">
                     <span style="display:inline-block;min-width:90px;color:#6b7280;font-weight:600;">URL</span>
-                    <a href="{{ $loginUrl }}" style="color:#0b1220;text-decoration:underline;font-family:SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace;font-size:13px;">{{ $loginUrl }}</a>
+                    <a href="{{ $loginUrl }}" target="_blank" rel="noopener" style="color:#0b1220;text-decoration:underline;font-family:SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace;font-size:13px;">{{ $loginUrl }}</a>
                 </div>
                 <div style="margin-bottom:10px;">
                     <span style="display:inline-block;min-width:90px;color:#6b7280;font-weight:600;">Email</span>
@@ -41,7 +41,7 @@
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0;">
         <tr>
             <td align="center" style="background-color:#0b1220;border-radius:6px;">
-                <a href="{{ $loginUrl }}" style="display:inline-block;padding:12px 28px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;">
+                <a href="{{ $loginUrl }}" target="_blank" rel="noopener" style="display:inline-block;padding:12px 28px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;">
                     Acceder al panel
                 </a>
             </td>
