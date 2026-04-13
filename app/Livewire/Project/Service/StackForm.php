@@ -445,7 +445,7 @@ class StackForm extends Component
             $fetchConfigFragment = '-c http.extraHeader='.escapeshellarg($authHeader).' ';
         }
 
-        $branchRef = escapeshellarg("origin/{$branch}");
+        $branchRef = "origin/{$branch}";
 
         $command = "cd /var/www/html"
             ." && if [ ! -d .git ]; then echo 'ERROR: Repository is not initialized in /var/www/html (.git missing).'; exit 1; fi"
@@ -457,14 +457,14 @@ class StackForm extends Component
             // Process-local credential injection via `git -c` — not
             // written to .git/config, gone as soon as the git process exits.
             ." && if ! git {$fetchConfigFragment}fetch --quiet origin ".escapeshellarg($branch)."; then echo 'ERROR: git fetch failed'; exit 1; fi"
-            ." && TARGET_HEAD=\"\$(git rev-parse {$branchRef} 2>/dev/null || true)\""
+            ." && TARGET_HEAD=\"\$(git rev-parse ".escapeshellarg($branchRef)." 2>/dev/null || true)\""
             ." && if [ -z \"\$TARGET_HEAD\" ]; then echo 'ERROR: Unable to resolve target commit from remote branch.'; exit 1; fi"
             ." && if [ -n \"\$CURRENT_HEAD\" ] && [ \"\$CURRENT_HEAD\" = \"\$TARGET_HEAD\" ]; then echo 'No new commits to deploy.'; else echo 'New commits deployed:'; if [ -n \"\$CURRENT_HEAD\" ]; then git log --reverse --format='%h %s (%an)' \"\$CURRENT_HEAD..\$TARGET_HEAD\"; else git log --reverse --format='%h %s (%an)' -n 10 \"\$TARGET_HEAD\"; fi; fi"
             // -f forces checkout over dirty files (storage/framework, cache
             // symlinks, etc.) that the container normally writes at runtime.
             // Without it, `git checkout -B` aborts with "local changes would
             // be overwritten" on any second deploy.
-            ." && if ! git checkout -f -B ".escapeshellarg($branch)." {$branchRef}; then echo 'ERROR: git checkout failed'; exit 1; fi"
+            ." && if ! git checkout -f -B ".escapeshellarg($branch)." ".escapeshellarg($branchRef)."; then echo 'ERROR: git checkout failed'; exit 1; fi"
             ." && if [ -f composer.json ]; then if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then echo 'ERROR: composer install failed'; echo 'Failed at: composer install'; sed -n '1,500p' /tmp/coolify-composer-install.log; exit 1; fi; fi"
             ." && if [ -f package.json ]; then if [ -f package-lock.json ]; then NPM_INSTALL_CMD='npm ci --no-audit --no-fund'; else NPM_INSTALL_CMD='npm install --no-audit --no-fund'; fi; if ! sh -lc \"\$NPM_INSTALL_CMD && npm run build\" >/tmp/coolify-npm-build.log 2>&1; then echo 'ERROR: frontend build failed'; echo 'Failed at: npm install/build'; sed -n '1,500p' /tmp/coolify-npm-build.log; exit 1; fi; fi"
             ." && if [ -f .env ]; then if grep -Eq '^ASSET_URL=' .env; then sed -i 's|^ASSET_URL=.*|ASSET_URL=|' .env; else echo 'ASSET_URL=' >> .env; fi; fi"
