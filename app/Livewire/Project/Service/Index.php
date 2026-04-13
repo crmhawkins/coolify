@@ -569,10 +569,7 @@ class Index extends Component
                     }
 
                     if ($missingPort) {
-                        $this->requiredPort = $requiredPort;
-                        $this->showPortWarningModal = true;
-
-                        return;
+                        $this->forceRemovePort = true;
                     }
                 }
             } else {
