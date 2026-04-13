@@ -41,13 +41,18 @@
         @if ($availableProjects->isEmpty())
             <div class="text-sm text-neutral-500">No tienes proyectos en este team todavía.</div>
         @else
-            <div class="pt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-6 gap-y-1 max-h-[28rem] overflow-y-auto border border-coolgray-300 rounded-md p-4">
-                @foreach ($availableProjects->sortBy('name') as $project)
-                    <label class="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-coolgray-200 rounded px-1">
-                        <input type="checkbox" wire:model="assignedProjectIds" value="{{ $project->id }}" class="rounded">
-                        <span class="truncate text-sm">{{ $project->name }}</span>
-                    </label>
-                @endforeach
+            <div x-data="{ search: '' }" class="pt-2">
+                <input type="text" x-model="search" placeholder="Buscar proyecto..."
+                    class="w-full sm:w-80 mb-3 px-3 py-2 text-sm border border-coolgray-300 rounded-md bg-transparent focus:border-warning focus:outline-none">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-6 gap-y-1 max-h-[28rem] overflow-y-auto border border-coolgray-300 rounded-md p-4">
+                    @foreach ($availableProjects->sortBy('name') as $project)
+                        <label x-show="search === '' || '{{ strtolower($project->name) }}'.includes(search.toLowerCase())"
+                            class="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-coolgray-200 rounded px-1">
+                            <input type="checkbox" wire:model="assignedProjectIds" value="{{ $project->id }}" class="rounded">
+                            <span class="truncate text-sm">{{ $project->name }}</span>
+                        </label>
+                    @endforeach
+                </div>
             </div>
         @endif
 
