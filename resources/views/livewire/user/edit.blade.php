@@ -34,21 +34,18 @@
         @if ($availableProjects->isEmpty())
             <div class="text-sm text-neutral-500">No tienes proyectos en este team todavía.</div>
         @else
-            {{-- Projects are chunked into columns of exactly 10 items. With
-                 11 projects the first column holds 10 and the second holds
-                 1; with 25 the layout is 10 / 10 / 5; and so on. On mobile
-                 every chunk stacks vertically. --}}
-            <div class="flex flex-wrap gap-x-10 gap-y-4 pt-2">
-                @foreach ($availableProjects->chunk(10) as $chunk)
-                    <div class="flex flex-col gap-1 min-w-[14rem]">
-                        @foreach ($chunk as $project)
-                            <label class="flex items-center gap-2">
-                                <input type="checkbox" wire:model="assignedProjectIds" value="{{ $project->id }}">
-                                <span class="truncate">{{ $project->name }}</span>
-                            </label>
-                        @endforeach
-                    </div>
-                @endforeach
+            <div x-data="{ search: '' }" class="pt-2">
+                <input type="text" x-model="search" placeholder="Buscar proyecto..."
+                    class="w-full sm:w-80 mb-3 px-3 py-2 text-sm border border-coolgray-300 rounded-md bg-transparent focus:border-warning focus:outline-none">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-6 gap-y-1 max-h-[28rem] overflow-y-auto border border-coolgray-300 rounded-md p-4">
+                    @foreach ($availableProjects->sortBy('name') as $project)
+                        <label x-show="search === '' || '{{ strtolower($project->name) }}'.includes(search.toLowerCase())"
+                            class="flex items-center gap-2 py-0.5 cursor-pointer hover:bg-coolgray-200 rounded px-1">
+                            <input type="checkbox" wire:model="assignedProjectIds" value="{{ $project->id }}" class="rounded">
+                            <span class="truncate text-sm">{{ $project->name }}</span>
+                        </label>
+                    @endforeach
+                </div>
             </div>
         @endif
 
