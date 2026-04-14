@@ -455,6 +455,14 @@ class StackForm extends Component
             // and the Deploy cambios button fails at the first fetch with no
             // actionable error.
             ." && git config --global --add safe.directory /var/www/html >/dev/null 2>&1 || true"
+            // Kill the interactive credential prompt. When a private repo has
+            // no token configured, bare `git fetch` hangs on "Username for
+            // 'https://github.com':" and the docker exec session times out
+            // with a cryptic error. GIT_TERMINAL_PROMPT=0 makes git fail
+            // fast with "could not read Username" which, combined with the
+            // GIT_FETCH_LOG capture below, lands in the Asset Command Output
+            // panel so the user immediately knows to set SERVICE_GITHUB_TOKEN.
+            ." && export GIT_TERMINAL_PROMPT=0"
             ." && if [ ! -d .git ]; then echo 'ERROR: Repository is not initialized in /var/www/html (.git missing). Use Redeploy from Coolify so the entrypoint can re-clone the repo, then try Deploy cambios again.'; exit 1; fi"
             // The .git directory may exist but be corrupted (interrupted
             // clone, volume restored from a half-written backup, manual
@@ -473,7 +481,14 @@ class StackForm extends Component
             // error (auth, network, unknown branch, dubious ownership…)
             // surfaces in the UI instead of a bare "git fetch failed".
             ." && GIT_FETCH_LOG=/tmp/coolify-git-fetch.log; : >\"\$GIT_FETCH_LOG\""
-            ." && if ! git {$fetchConfigFragment}fetch origin ".escapeshellarg($branch)." >\"\$GIT_FETCH_LOG\" 2>&1; then echo 'ERROR: git fetch failed'; echo 'Failed at: git fetch origin ".addslashes($branch)."'; sed -n '1,200p' \"\$GIT_FETCH_LOG\"; exit 1; fi"
+            ." && if ! git {$fetchConfigFragment}fetch origin ".escapeshellarg($branch)." >\"\$GIT_FETCH_LOG\" 2>&1; then echo 'ERROR: git fetch failed'; echo 'Failed at: git fetch origin ".addslashes($branch)."'; sed -n '1,200p' \"\$GIT_FETCH_LOG\"; "
+            // Surface the most common root cause (no/expired GitHub token
+            // on a private repo) with a one-line actionable hint. We only
+            // print it when git's stderr matches the known "could not read
+            // Username" signature so public-repo network failures are not
+            // drowned in a misleading "set your token" message.
+            ."if grep -q 'could not read Username' \"\$GIT_FETCH_LOG\" 2>/dev/null; then echo 'HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured. Set SERVICE_GITHUB_TOKEN in the Coolify service environment and try again.'; fi; "
+            ."exit 1; fi"
             ." && TARGET_HEAD=\"\$(git rev-parse ".escapeshellarg($branchRef)." 2>/dev/null || true)\""
             ." && if [ -z \"\$TARGET_HEAD\" ]; then echo 'ERROR: Unable to resolve target commit from remote branch.'; exit 1; fi"
             ." && if [ -n \"\$CURRENT_HEAD\" ] && [ \"\$CURRENT_HEAD\" = \"\$TARGET_HEAD\" ]; then echo 'No new commits to deploy.'; else echo 'New commits deployed:'; if [ -n \"\$CURRENT_HEAD\" ]; then git log --reverse --format='%h %s (%an)' \"\$CURRENT_HEAD..\$TARGET_HEAD\"; else git log --reverse --format='%h %s (%an)' -n 10 \"\$TARGET_HEAD\"; fi; fi"

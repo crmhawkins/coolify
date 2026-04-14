@@ -115,6 +115,69 @@ it('configures laravel rootkit to use file cache and guarded schedule run mode',
         ->toContain('APP_DEBUG=${SERVICE_LARAVEL_APP_DEBUG:-false}');
 });
 
+it('installs ext-imap on demand and picks up ext requirements from composer.lock', function () {
+    $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
+
+    expect($template)
+        // The dynamic extension installer must have an explicit recipe
+        // for ext-imap (Alpine apk prerequisites + docker-php-ext on
+        // PHP <= 8.3 with a pecl fallback for PHP 8.4 where the
+        // extension was removed from php-src). Without the recipe the
+        // generic `*)` branch tries docker-php-ext-install imap and
+        // fails because imap-dev / krb5-dev are not on the image.
+        ->toContain('imap-dev krb5-dev openssl-dev')
+        ->toContain('docker-php-ext-configure imap --with-imap --with-imap-ssl')
+        ->toContain('pecl install imap')
+        // composer install reads composer.lock, not composer.json, so
+        // the pre-flight extension installer has to match that view of
+        // the world. The parser now merges platform/platform-dev plus
+        // every package's require list from the lock, on top of the
+        // project composer.json require / require-dev.
+        ->toContain('$l = @json_decode(@file_get_contents("composer.lock"), true);')
+        ->toContain('"platform"')
+        ->toContain('"platform-dev"')
+        ->toContain('"packages-dev"');
+});
+
+it('guards git operations against dubious ownership and interactive prompts', function () {
+    $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
+    $stackForm = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($template)
+        // safe.directory and GIT_TERMINAL_PROMPT must be configured
+        // BEFORE the first git op. The old placement left both after
+        // the fetch/checkout block, so the very first subsequent boot
+        // on a volume owned by a different uid aborted with
+        // "fatal: detected dubious ownership" before we ever applied
+        // the fix. Lock the ordering by asserting both keywords land
+        // ahead of the `if [ ! -d .git ]` clone branch.
+        ->toContain('export GIT_TERMINAL_PROMPT=0')
+        ->toContain('git config --global --add safe.directory /var/www/html');
+
+    // Structural assertion: safe.directory must sit before the clone.
+    $safePos = strpos($template, 'git config --global --add safe.directory /var/www/html');
+    $clonePos = strpos($template, 'if [ ! -d .git ]; then');
+    expect($safePos)->toBeLessThan($clonePos);
+    // And it must no longer appear AFTER the fetch/checkout block at
+    // the old position (the legacy duplicate line has been removed).
+    $fetchPos = strpos($template, 'git fetch --prune origin 2>&1');
+    expect($fetchPos)->toBeGreaterThan(0);
+    // If a second safe.directory directive still existed after the
+    // fetch block it would mean the cleanup did not land.
+    expect(substr_count($template, 'git config --global --add safe.directory /var/www/html'))->toBe(1);
+
+    expect($stackForm)
+        // Deploy cambios must also export GIT_TERMINAL_PROMPT=0 before
+        // the fetch so a missing/expired token fails fast instead of
+        // hanging the docker exec session on an invisible prompt.
+        ->toContain('export GIT_TERMINAL_PROMPT=0')
+        // When fetch fails with the "could not read Username"
+        // signature we surface an explicit hint pointing at
+        // SERVICE_GITHUB_TOKEN so operators know exactly what to fix.
+        ->toContain("grep -q 'could not read Username'")
+        ->toContain('HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured.');
+});
+
 it('hardens laravel rootkit boot pipeline so broken deploys surface as unhealthy', function () {
     $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
 

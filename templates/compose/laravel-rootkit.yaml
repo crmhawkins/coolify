@@ -240,6 +240,20 @@ services:
             SERVICE_PUBLIC_URL_RUNTIME="https://${SERVICE_PUBLIC_URL_RUNTIME#http://}"
           fi
 
+          # Pre-configure git BEFORE any operation on /var/www/html.
+          # The laravel-files named volume can end up owned by a
+          # different uid across container recreations (docker volume
+          # drivers, Alpine uid remapping, root vs www-data chowns
+          # from other services sharing the same volume, etc). Without
+          # safe.directory git refuses every subsequent command with
+          # "detected dubious ownership" and the entrypoint would
+          # silently fall through to an empty working tree. We also
+          # kill the interactive credential prompt so a misconfigured
+          # private repo fails fast with a clear message instead of
+          # hanging the deploy waiting for a TTY that will never exist.
+          git config --global --add safe.directory /var/www/html || true
+          export GIT_TERMINAL_PROMPT=0
+
           if [ ! -d .git ]; then
             if [ -n "${GITHUB_TOKEN}" ]; then
               echo "Cloning repository (branch: ${REPO_BRANCH}) using GitHub token..."
@@ -259,6 +273,7 @@ services:
             if [ "$CLONE_EXIT" -ne 0 ]; then
               echo "FATAL: git clone failed for ${REPO_URL_PUBLIC} (branch ${REPO_BRANCH})."
               echo "Check SERVICE_GITHUB_REPO_URL, SERVICE_GITHUB_BRANCH, SERVICE_GITHUB_TOKEN and that the container can reach github.com."
+              echo "If the repository is private, set SERVICE_GITHUB_TOKEN in the Coolify service environment — the container has no TTY and cannot prompt for credentials interactively."
               exit 1
             fi
             # Remove the token from .git/config so a long-lived container
@@ -297,8 +312,6 @@ services:
               fi
             fi
           fi
-
-          git config --global --add safe.directory /var/www/html || true
 
           # ============================================================
           # PRE-FLIGHT PHP version check
@@ -744,23 +757,51 @@ services:
           #   the same error-page shell as the PHP version preflight.
           rm -f /tmp/coolify-ext-requested.txt 2>/dev/null || true
 
-          # Extract ext-* keys from composer.json via a PHP one-liner
-          # (no composer needed). Merges require + require-dev so we
-          # also pick up ext-xdebug and friends that may be dev-only
-          # but are still needed for the project to boot.
+          # Extract ext-* keys from composer.json AND composer.lock via
+          # a PHP one-liner (no composer needed). We merge three
+          # sources so no ext-* requirement slips through:
+          #
+          # - composer.json "require"      → project's own deps
+          # - composer.json "require-dev"  → dev-time deps (xdebug, etc)
+          # - composer.lock "platform" +
+          #   every package's "require"    → transitive platform reqs
+          #
+          # The composer.lock path matters because a stale lock file
+          # can list ext-* requirements that are no longer in the live
+          # composer.json (e.g. GestorCorreo had ext-imap moved from
+          # require to suggest locally but the committed lock still
+          # pinned it). composer install reads the lock, not the json,
+          # so the platform check runs against the lock — we have to
+          # match its view of the world or every install fails with
+          # "ext-X missing" that the dynamic installer never picked up.
           cd /var/www/html
           REQUESTED_EXTS="$(php -r '
-          $j = @json_decode(@file_get_contents("composer.json"), true);
-          if (!is_array($j)) { exit(0); }
-          $req = array_merge((array) ($j["require"] ?? []), (array) ($j["require-dev"] ?? []));
           $exts = [];
-          foreach (array_keys($req) as $k) {
-              if (is_string($k) && strpos($k, "ext-") === 0) {
-                  $name = substr($k, 4);
-                  if ($name !== "") { $exts[] = $name; }
+          $collect = function (array $reqs) use (&$exts) {
+              foreach (array_keys($reqs) as $k) {
+                  if (is_string($k) && strpos($k, "ext-") === 0) {
+                      $name = substr($k, 4);
+                      if ($name !== "") { $exts[$name] = true; }
+                  }
+              }
+          };
+          $j = @json_decode(@file_get_contents("composer.json"), true);
+          if (is_array($j)) {
+              $collect((array) ($j["require"] ?? []));
+              $collect((array) ($j["require-dev"] ?? []));
+          }
+          $l = @json_decode(@file_get_contents("composer.lock"), true);
+          if (is_array($l)) {
+              $collect((array) ($l["platform"] ?? []));
+              $collect((array) ($l["platform-dev"] ?? []));
+              foreach ((array) ($l["packages"] ?? []) as $p) {
+                  if (is_array($p)) { $collect((array) ($p["require"] ?? [])); }
+              }
+              foreach ((array) ($l["packages-dev"] ?? []) as $p) {
+                  if (is_array($p)) { $collect((array) ($p["require"] ?? [])); }
               }
           }
-          echo implode(" ", $exts);
+          echo implode(" ", array_keys($exts));
           ' 2>/dev/null || true)"
 
           UNRESOLVABLE_EXTS=""
@@ -798,6 +839,25 @@ services:
                 ldap)
                   apk add --no-cache openldap-dev >/dev/null 2>&1
                   docker-php-ext-install -j"$(nproc)" ldap >/dev/null 2>&1 && EXT_INSTALL_OK=1
+                  ;;
+                imap)
+                  # IMAP support for Laravel apps that sync mailboxes
+                  # (GestorCorreo, webmail wrappers, etc). The native
+                  # docker-php-ext-install path works on PHP 7.x – 8.3.
+                  # On PHP 8.4+ the extension was removed from php-src
+                  # and only exists as a pecl package, so we fall back
+                  # to `pecl install imap` when the docker-php path
+                  # fails. Both require the Alpine imap-dev headers
+                  # plus a working krb5-dev/openssl-dev toolchain for
+                  # the --with-imap-ssl build flag.
+                  apk add --no-cache imap-dev krb5-dev openssl-dev >/dev/null 2>&1
+                  if docker-php-ext-configure imap --with-imap --with-imap-ssl >/dev/null 2>&1 \
+                     && docker-php-ext-install -j"$(nproc)" imap >/dev/null 2>&1; then
+                    EXT_INSTALL_OK=1
+                  elif pecl install imap >/dev/null 2>&1 \
+                       && docker-php-ext-enable imap >/dev/null 2>&1; then
+                    EXT_INSTALL_OK=1
+                  fi
                   ;;
                 apcu)
                   pecl install apcu >/dev/null 2>&1 && docker-php-ext-enable apcu >/dev/null 2>&1 && EXT_INSTALL_OK=1
