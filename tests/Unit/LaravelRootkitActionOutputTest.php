@@ -83,7 +83,7 @@ it('configures laravel rootkit to use file cache and guarded schedule run mode',
         ->toContain('condition: service_healthy')
         ->toContain('No such container')
         ->toContain('command: ["nginx", "-g", "daemon off;"]')
-        ->toContain('try_files $uri $uri/ /index.php?$query_string;')
+        ->toContain('try_files /_coolify_preflight_error.html $uri $uri/ /index.php?$query_string;')
         ->toContain('fastcgi_param HTTP_X_FORWARDED_PROTO $http_x_forwarded_proto;')
         ->toContain('fastcgi_param HTTP_X_FORWARDED_HOST $http_x_forwarded_host;')
         ->toContain('fastcgi_param HTTP_X_FORWARDED_PORT $http_x_forwarded_port;')
@@ -113,6 +113,44 @@ it('configures laravel rootkit to use file cache and guarded schedule run mode',
         ->not->toContain('chown -R www-data:www-data /var/www/html'."\n")
         // APP_DEBUG is configurable via Coolify env var.
         ->toContain('APP_DEBUG=${SERVICE_LARAVEL_APP_DEBUG:-false}');
+});
+
+it('hardens laravel rootkit boot pipeline so broken deploys surface as unhealthy', function () {
+    $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
+
+    expect($template)
+        // Fix 1 — php-fpm healthcheck now fails when vendor/autoload.php
+        // is missing or the install-failed sentinel is present. The old
+        // check only looked at artisan, which meant Coolify reported a
+        // broken deploy as "running/healthy" while users saw PHP fatals.
+        ->toContain('test -f /var/www/html/vendor/autoload.php')
+        ->toContain('test ! -f /var/www/html/.coolify_install_failed')
+        // Fix 2 — composer install fast-path keyed on composer.lock hash.
+        // Cuts boot time on unchanged deploys from ~10-30s to near zero
+        // and survives across container recreation because the hash file
+        // lives inside the laravel-files named volume.
+        ->toContain('/var/www/html/.coolify/composer.lock.sha256')
+        ->toContain('composer.lock unchanged and vendor/autoload.php present — skipping composer install.')
+        // Fix 3 — sentinel file is both created on composer install
+        // failure and cleared on every successful / skipped install, so
+        // the health state flips back to green once the user fixes the
+        // underlying problem and redeploys.
+        ->toContain(': > /var/www/html/.coolify_install_failed')
+        ->toContain('rm -f /var/www/html/.coolify_install_failed')
+        // Fix 4 — nginx serves the Spanish error page as error_page
+        // fallback when PHP 500s (missing vendor, php-fpm down, etc).
+        ->toContain('error_page 500 502 503 504 /_coolify_error.html;')
+        ->toContain('location = /_coolify_error.html {')
+        // Fix 5 — first-time git clone is a hard fail with an actionable
+        // message pointing at the SERVICE_GITHUB_* env vars instead of a
+        // raw git stderr buried in container logs.
+        ->toContain('FATAL: git clone failed')
+        ->toContain('Check SERVICE_GITHUB_REPO_URL, SERVICE_GITHUB_BRANCH, SERVICE_GITHUB_TOKEN')
+        // Fix 6 — scheduler and queue-worker block on both artisan AND
+        // vendor/autoload.php before starting, so they stop crash-looping
+        // while the entrypoint is still running composer install.
+        ->toContain('Waiting for Laravel installation (artisan + vendor/autoload.php)...')
+        ->toContain('[ ! -f /var/www/html/artisan ] || [ ! -f /var/www/html/vendor/autoload.php ]');
 });
 
 it('loads cron tasks from artisan schedule list or project source fallback', function () {

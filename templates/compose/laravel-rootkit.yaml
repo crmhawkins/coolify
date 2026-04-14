@@ -31,7 +31,7 @@ services:
           autorestart=true
 
           [program:scheduler]
-          command=sh -c "while [ ! -f /var/www/html/artisan ]; do echo 'Waiting for Laravel installation...'; sleep 10; done; cd /var/www/html && php artisan optimize:clear >/dev/null 2>&1 || true; php artisan config:clear >/dev/null 2>&1 || true; while true; do if [ \"${SERVICE_LARAVEL_SCHEDULER_ENABLED:-true}\" != \"true\" ]; then echo 'Laravel scheduler disabled via SERVICE_LARAVEL_SCHEDULER_ENABLED'; sleep 60; continue; fi; if php artisan schedule:list --no-interaction >/dev/null 2>&1; then php artisan schedule:run --no-interaction 2>&1; else echo 'Laravel scheduler unavailable, retrying in 60 seconds'; fi; sleep 60; done"
+          command=sh -c "while [ ! -f /var/www/html/artisan ] || [ ! -f /var/www/html/vendor/autoload.php ]; do echo 'Waiting for Laravel installation (artisan + vendor/autoload.php)...'; sleep 10; done; cd /var/www/html && php artisan optimize:clear >/dev/null 2>&1 || true; php artisan config:clear >/dev/null 2>&1 || true; while true; do if [ \"${SERVICE_LARAVEL_SCHEDULER_ENABLED:-true}\" != \"true\" ]; then echo 'Laravel scheduler disabled via SERVICE_LARAVEL_SCHEDULER_ENABLED'; sleep 60; continue; fi; if php artisan schedule:list --no-interaction >/dev/null 2>&1; then php artisan schedule:run --no-interaction 2>&1; else echo 'Laravel scheduler unavailable, retrying in 60 seconds'; fi; sleep 60; done"
           user=www-data
           redirect_stderr=true
           stdout_logfile=/dev/stdout
@@ -43,7 +43,7 @@ services:
 
           [program:queue-worker]
           process_name=%(program_name)s_%(process_num)02d
-          command=sh -c "while [ ! -f /var/www/html/artisan ]; do echo 'Waiting for Laravel installation...'; sleep 10; done; php /var/www/html/artisan queue:work --queue=${SERVICE_LARAVEL_QUEUE_NAMES:-default} --sleep=3 --tries=3 --max-time=3600"
+          command=sh -c "while [ ! -f /var/www/html/artisan ] || [ ! -f /var/www/html/vendor/autoload.php ]; do echo 'Waiting for Laravel installation (artisan + vendor/autoload.php)...'; sleep 10; done; php /var/www/html/artisan queue:work --queue=${SERVICE_LARAVEL_QUEUE_NAMES:-default} --sleep=3 --tries=3 --max-time=3600"
           user=www-data
           redirect_stderr=true
           stdout_logfile=/dev/stdout
@@ -247,7 +247,20 @@ services:
               echo "Cloning repository ${REPO_URL_PUBLIC} (branch: ${REPO_BRANCH})..."
             fi
             rm -rf * .[!.]* 2>/dev/null || true
-            git clone --depth 1 --no-tags --branch "${REPO_BRANCH}" --single-branch "${REPO_URL}" .
+            # Hard-fail on first clone: there is nothing to serve if the
+            # initial clone did not produce a working tree. Without this
+            # the script would continue under `set -e` but the error
+            # message would be an opaque git stderr instead of the
+            # actionable "check SERVICE_GITHUB_* settings" hint below.
+            set +e
+            git clone --depth 1 --no-tags --branch "${REPO_BRANCH}" --single-branch "${REPO_URL}" . 2>&1
+            CLONE_EXIT="$?"
+            set -e
+            if [ "$CLONE_EXIT" -ne 0 ]; then
+              echo "FATAL: git clone failed for ${REPO_URL_PUBLIC} (branch ${REPO_BRANCH})."
+              echo "Check SERVICE_GITHUB_REPO_URL, SERVICE_GITHUB_BRANCH, SERVICE_GITHUB_TOKEN and that the container can reach github.com."
+              exit 1
+            fi
             # Remove the token from .git/config so a long-lived container
             # cannot leak it. Subsequent fetches use GIT_ASKPASS below.
             git remote set-url origin "${REPO_URL_PUBLIC}"
@@ -941,35 +954,80 @@ services:
           # ============================================================
 
           if [ -f composer.json ]; then
-            echo "Installing Composer dependencies..."
-            set +e
-            COMPOSER_OUTPUT="$(composer install --no-interaction --prefer-dist --optimize-autoloader 2>&1)"
-            COMPOSER_EXIT="$?"
-            set -e
-            if [ "$COMPOSER_EXIT" -ne 0 ]; then
-              echo "$COMPOSER_OUTPUT" >&2
+            # Fast-path: if composer.lock has not changed since the last
+            # successful install AND vendor/autoload.php is on disk we can
+            # skip the whole composer install step. This brings container
+            # restart time from ~10-30 s down to near instant for the
+            # common "nothing to deploy" case (queue worker crash,
+            # supervisord restart, manual docker restart, etc).
+            #
+            # The hash lives inside the laravel-files named volume so it
+            # survives across container recreation and Redeploy. It is
+            # scoped under .coolify/ to keep our bookkeeping separate
+            # from the project files git tracks.
+            mkdir -p /var/www/html/.coolify
+            COMPOSER_HASH_FILE=/var/www/html/.coolify/composer.lock.sha256
+            COMPOSER_HASH_NOW=""
+            if [ -f composer.lock ]; then
+              COMPOSER_HASH_NOW="$(sha256sum composer.lock 2>/dev/null | awk '{print $1}')"
+            fi
+            COMPOSER_HASH_PREV=""
+            if [ -f "$COMPOSER_HASH_FILE" ]; then
+              COMPOSER_HASH_PREV="$(cat "$COMPOSER_HASH_FILE" 2>/dev/null || true)"
+            fi
 
-              mkdir -p /var/www/html/public
+            if [ -n "$COMPOSER_HASH_NOW" ] \
+               && [ "$COMPOSER_HASH_NOW" = "$COMPOSER_HASH_PREV" ] \
+               && [ -f /var/www/html/vendor/autoload.php ]; then
+              echo "composer.lock unchanged and vendor/autoload.php present — skipping composer install."
+              rm -f /var/www/html/.coolify_install_failed 2>/dev/null || true
+            else
+              echo "Installing Composer dependencies..."
+              set +e
+              COMPOSER_OUTPUT="$(composer install --no-interaction --prefer-dist --optimize-autoloader 2>&1)"
+              COMPOSER_EXIT="$?"
+              set -e
+              if [ "$COMPOSER_EXIT" -ne 0 ]; then
+                echo "$COMPOSER_OUTPUT" >&2
 
-              REQUIRED="$(printf '%s' "$COMPOSER_OUTPUT" | grep -Eo 'requires php[^\\n]+' | head -n 1 || true)"
-              CURRENT="$(php -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+                mkdir -p /var/www/html/public
 
-              {
-                printf '%s\n' '<!doctype html>'
-                printf '%s\n' '<html lang="en"><head><meta charset="utf-8" />'
-                printf '%s\n' '<meta name="viewport" content="width=device-width, initial-scale=1" />'
-                printf '%s\n' '<title>Coolify: Laravel install failed</title>'
-                printf '%s\n' '<style>:root{color-scheme:dark}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#0b0f19;color:#e5e7eb}.wrap{max-width:960px;margin:0 auto;padding:32px 20px}.card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px}h1{font-size:18px;margin:0 0 12px}p{margin:0 0 12px;color:#cbd5e1}pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:12px;color:#e5e7eb}.muted{color:#94a3b8;font-size:13px}</style></head><body>'
-                printf '%s\n' '<div class="wrap"><div class="card">'
-                printf '%s\n' '<h1>Laravel dependency install failed</h1>'
-                printf '%s\n' '<p>This service could not run <code>composer install</code>.</p>'
-                printf '%s\n' "<p><strong>Current PHP:</strong> ${CURRENT}</p>"
-                printf '%s\n' "<p><strong>Requirement:</strong> ${REQUIRED}</p>"
-                printf '%s\n' '<p class="muted">Fix: In Coolify, set this service PHP Version to a compatible value (for copiservi use 8.3 or newer) and redeploy.</p>'
-                printf '%s\n' '<pre>'
-                printf '%s\n' "$COMPOSER_OUTPUT"
-                printf '%s\n' '</pre></div></div></body></html>'
-              } > /var/www/html/public/_coolify_error.html
+                # Sentinel file the php-fpm healthcheck reads. When it
+                # exists the healthcheck fails so Coolify surfaces the
+                # service as unhealthy in the UI instead of the previous
+                # "running/healthy" state where vendor/ was empty and
+                # the site served raw PHP fatals.
+                : > /var/www/html/.coolify_install_failed
+
+                REQUIRED="$(printf '%s' "$COMPOSER_OUTPUT" | grep -Eo 'requires php[^\\n]+' | head -n 1 || true)"
+                CURRENT="$(php -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+
+                {
+                  printf '%s\n' '<!doctype html>'
+                  printf '%s\n' '<html lang="en"><head><meta charset="utf-8" />'
+                  printf '%s\n' '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+                  printf '%s\n' '<title>Coolify: Laravel install failed</title>'
+                  printf '%s\n' '<style>:root{color-scheme:dark}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#0b0f19;color:#e5e7eb}.wrap{max-width:960px;margin:0 auto;padding:32px 20px}.card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px}h1{font-size:18px;margin:0 0 12px}p{margin:0 0 12px;color:#cbd5e1}pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:12px;color:#e5e7eb}.muted{color:#94a3b8;font-size:13px}</style></head><body>'
+                  printf '%s\n' '<div class="wrap"><div class="card">'
+                  printf '%s\n' '<h1>Laravel dependency install failed</h1>'
+                  printf '%s\n' '<p>This service could not run <code>composer install</code>.</p>'
+                  printf '%s\n' "<p><strong>Current PHP:</strong> ${CURRENT}</p>"
+                  printf '%s\n' "<p><strong>Requirement:</strong> ${REQUIRED}</p>"
+                  printf '%s\n' '<p class="muted">Fix: In Coolify, set this service PHP Version to a compatible value (for copiservi use 8.3 or newer) and redeploy.</p>'
+                  printf '%s\n' '<pre>'
+                  printf '%s\n' "$COMPOSER_OUTPUT"
+                  printf '%s\n' '</pre></div></div></body></html>'
+                } > /var/www/html/public/_coolify_error.html
+              else
+                # Happy path: persist the hash so the next boot can skip
+                # composer install, and clear any leftover failure
+                # sentinel from a previous failed deploy so the
+                # healthcheck turns green again.
+                if [ -n "$COMPOSER_HASH_NOW" ]; then
+                  printf '%s' "$COMPOSER_HASH_NOW" > "$COMPOSER_HASH_FILE"
+                fi
+                rm -f /var/www/html/.coolify_install_failed 2>/dev/null || true
+              fi
             fi
           fi
 
@@ -1286,7 +1344,22 @@ services:
       mariadb:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "php-fpm -t >/dev/null 2>&1 && test -f /var/www/html/artisan && php -r \"exit(@fsockopen('127.0.0.1',9000)?0:1);\""]
+      # The healthcheck covers THREE failure modes, not just "is php-fpm
+      # listening on 9000":
+      #   1. php-fpm itself boots (config syntax + socket). If supervisord
+      #      is running but php-fpm crashlooped we want this to flip red.
+      #   2. artisan AND vendor/autoload.php both exist. The old check
+      #      only verified artisan — that passes the moment git clone
+      #      finishes, long before composer install has produced the
+      #      autoloader, so a container with empty vendor/ still reported
+      #      "healthy" and Coolify happily fronted it with Traefik.
+      #   3. The /var/www/html/.coolify_install_failed sentinel from the
+      #      entrypoint is absent. If composer install crashed we leave
+      #      that file behind so the container can stay up (nginx still
+      #      serves the Spanish error page) but Coolify sees it as
+      #      unhealthy and surfaces the failure in the UI instead of the
+      #      previous "everything's fine" green badge on a broken site.
+      test: ["CMD-SHELL", "php-fpm -t >/dev/null 2>&1 && test -f /var/www/html/artisan && test -f /var/www/html/vendor/autoload.php && test ! -f /var/www/html/.coolify_install_failed && php -r \"exit(@fsockopen('127.0.0.1',9000)?0:1);\""]
       interval: 15s
       timeout: 10s
       retries: 20
@@ -1366,6 +1439,24 @@ services:
 
               resolver 127.0.0.11 ipv6=off valid=10s;
               set $php_upstream "laravel:9000";
+
+              # When PHP fatals (missing vendor/autoload.php, composer
+              # install failed, php-fpm unreachable, etc) nginx falls
+              # back to the Spanish error page the entrypoint writes to
+              # public/_coolify_error.html. Without this hook users saw
+              # the raw "Failed to open stream: vendor/autoload.php"
+              # fatal, which is technically accurate but useless for a
+              # non-developer redeploying a client site.
+              #
+              # If the error page itself is missing (first boot, clean
+              # volume, entrypoint still cloning) this location block
+              # is a silent no-op and nginx returns its default error
+              # page. The `internal` directive means you cannot hit the
+              # page directly by URL — it is only served via error_page.
+              error_page 500 502 503 504 /_coolify_error.html;
+              location = /_coolify_error.html {
+                  internal;
+              }
 
               location / {
                   # Pre-flight error page intercept. When the laravel
