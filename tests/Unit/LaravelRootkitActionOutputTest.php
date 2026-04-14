@@ -24,6 +24,50 @@ it('reports deployed commits and focused failure stages in rootkit stack actions
         ->toContain('php artisan view:clear');
 });
 
+it('hardens deployLaravelChanges against dubious ownership, broken .git and missing vendor', function () {
+    $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($stackFormFile)
+        // Git must trust the working tree even when root runs inside a
+        // www-data-owned checkout. Without this the first git op aborts
+        // with "detected dubious ownership" and Deploy cambios fails with
+        // zero context.
+        ->toContain('git config --global --add safe.directory /var/www/html')
+        // If .git is missing or structurally broken we must give the user
+        // an actionable next step (Redeploy from Coolify) instead of a
+        // bare "git fetch failed".
+        ->toContain('Repository is not initialized in /var/www/html')
+        ->toContain('.git directory is corrupted')
+        // The fetch must write stdout+stderr to a log file so the real
+        // git error surfaces in the Asset Command Output panel. The old
+        // behaviour used --quiet which swallowed the actual message.
+        ->toContain('GIT_FETCH_LOG=/tmp/coolify-git-fetch.log')
+        ->toContain('Failed at: git fetch origin')
+        // Deploy cambios must log the "installing from scratch" case so
+        // operators can tell the difference between a normal incremental
+        // deploy and a recovery deploy that had to rebuild vendor/.
+        ->toContain('vendor/autoload.php missing — installing PHP dependencies from scratch.')
+        ->toContain('Composer dependencies installed.');
+});
+
+it('auto-recovers missing vendor autoload in run migrations and clear cache all', function () {
+    $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($stackFormFile)
+        // Both buttons share a single helper that runs composer install
+        // when vendor/autoload.php is missing, so operators no longer get
+        // the raw "Failed to open stream: vendor/autoload.php" PHP fatal
+        // when they click Run migrations or Clear Cache All on a half
+        // deployed laravel-rootkit stack.
+        ->toContain('buildEnsureComposerInstalledFragment')
+        ->toContain('vendor/autoload.php missing — installing PHP dependencies automatically before continuing.')
+        ->toContain('Failed at: composer install (auto-recovery)')
+        // Safety net: if composer.json is not present either, the helper
+        // must refuse to run composer install and tell the user to redeploy
+        // so the entrypoint can re-clone the repo.
+        ->toContain('vendor/autoload.php is missing and composer.json was not found');
+});
+
 it('configures laravel rootkit to use file cache and guarded schedule run mode', function () {
     $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
 

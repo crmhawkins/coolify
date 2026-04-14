@@ -448,7 +448,20 @@ class StackForm extends Component
         $branchRef = "origin/{$branch}";
 
         $command = "cd /var/www/html"
-            ." && if [ ! -d .git ]; then echo 'ERROR: Repository is not initialized in /var/www/html (.git missing).'; exit 1; fi"
+            // Make sure git trusts this directory even when the working tree
+            // is owned by www-data but we're running as root (the default for
+            // docker exec into the laravel-rootkit container). Without this,
+            // git refuses every operation with "detected dubious ownership"
+            // and the Deploy cambios button fails at the first fetch with no
+            // actionable error.
+            ." && git config --global --add safe.directory /var/www/html >/dev/null 2>&1 || true"
+            ." && if [ ! -d .git ]; then echo 'ERROR: Repository is not initialized in /var/www/html (.git missing). Use Redeploy from Coolify so the entrypoint can re-clone the repo, then try Deploy cambios again.'; exit 1; fi"
+            // The .git directory may exist but be corrupted (interrupted
+            // clone, volume restored from a half-written backup, manual
+            // rm -rf of refs, etc). `git rev-parse --git-dir` is the
+            // cheapest sanity check: if it errors the repo is unusable and
+            // there is no point running fetch/checkout against it.
+            ." && if ! git rev-parse --git-dir >/dev/null 2>&1; then echo 'ERROR: .git directory is corrupted. Use Redeploy from Coolify so the entrypoint can re-clone the repo, then try Deploy cambios again.'; exit 1; fi"
             ." && CURRENT_HEAD=\"\$(git rev-parse HEAD 2>/dev/null || true)\""
             // Persist the clean URL (no token). Use --push=... too so both
             // fetch and push remotes end up tokenless.
@@ -456,7 +469,11 @@ class StackForm extends Component
             ." && git remote set-url --push origin ".escapeshellarg($cleanRepoUrl)
             // Process-local credential injection via `git -c` — not
             // written to .git/config, gone as soon as the git process exits.
-            ." && if ! git {$fetchConfigFragment}fetch --quiet origin ".escapeshellarg($branch)."; then echo 'ERROR: git fetch failed'; exit 1; fi"
+            // We capture fetch stdout+stderr to a log file so the real git
+            // error (auth, network, unknown branch, dubious ownership…)
+            // surfaces in the UI instead of a bare "git fetch failed".
+            ." && GIT_FETCH_LOG=/tmp/coolify-git-fetch.log; : >\"\$GIT_FETCH_LOG\""
+            ." && if ! git {$fetchConfigFragment}fetch origin ".escapeshellarg($branch)." >\"\$GIT_FETCH_LOG\" 2>&1; then echo 'ERROR: git fetch failed'; echo 'Failed at: git fetch origin ".addslashes($branch)."'; sed -n '1,200p' \"\$GIT_FETCH_LOG\"; exit 1; fi"
             ." && TARGET_HEAD=\"\$(git rev-parse ".escapeshellarg($branchRef)." 2>/dev/null || true)\""
             ." && if [ -z \"\$TARGET_HEAD\" ]; then echo 'ERROR: Unable to resolve target commit from remote branch.'; exit 1; fi"
             ." && if [ -n \"\$CURRENT_HEAD\" ] && [ \"\$CURRENT_HEAD\" = \"\$TARGET_HEAD\" ]; then echo 'No new commits to deploy.'; else echo 'New commits deployed:'; if [ -n \"\$CURRENT_HEAD\" ]; then git log --reverse --format='%h %s (%an)' \"\$CURRENT_HEAD..\$TARGET_HEAD\"; else git log --reverse --format='%h %s (%an)' -n 10 \"\$TARGET_HEAD\"; fi; fi"
@@ -465,7 +482,12 @@ class StackForm extends Component
             // Without it, `git checkout -B` aborts with "local changes would
             // be overwritten" on any second deploy.
             ." && if ! git checkout -f -B ".escapeshellarg($branch)." ".escapeshellarg($branchRef)."; then echo 'ERROR: git checkout failed'; exit 1; fi"
-            ." && if [ -f composer.json ]; then if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then echo 'ERROR: composer install failed'; echo 'Failed at: composer install'; sed -n '1,500p' /tmp/coolify-composer-install.log; exit 1; fi; fi"
+            // composer install runs whenever composer.json exists. We log
+            // the "vendor/autoload.php missing" case explicitly so the
+            // output panel makes it obvious that this deploy is installing
+            // PHP deps for the first time (or recovering from a previous
+            // failed boot where vendor/ never got written to the volume).
+            ." && if [ -f composer.json ]; then if [ ! -f vendor/autoload.php ]; then echo 'vendor/autoload.php missing — installing PHP dependencies from scratch.'; fi; if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then echo 'ERROR: composer install failed'; echo 'Failed at: composer install'; sed -n '1,500p' /tmp/coolify-composer-install.log; exit 1; fi; echo 'Composer dependencies installed.'; fi"
             ." && if [ -f package.json ]; then if [ -f package-lock.json ]; then NPM_INSTALL_CMD='npm ci --no-audit --no-fund'; else NPM_INSTALL_CMD='npm install --no-audit --no-fund'; fi; if ! sh -lc \"\$NPM_INSTALL_CMD && npm run build\" >/tmp/coolify-npm-build.log 2>&1; then echo 'ERROR: frontend build failed'; echo 'Failed at: npm install/build'; sed -n '1,500p' /tmp/coolify-npm-build.log; exit 1; fi; fi"
             ." && if [ -f .env ]; then if grep -Eq '^ASSET_URL=' .env; then sed -i 's|^ASSET_URL=.*|ASSET_URL=|' .env; else echo 'ASSET_URL=' >> .env; fi; fi"
             // Clear first (so new code is picked up), then re-cache config/
@@ -495,7 +517,9 @@ class StackForm extends Component
         }
 
         $this->runFrontendAssetCommand(
-            "cd /var/www/html && if [ -f artisan ]; then "
+            "cd /var/www/html && "
+            .$this->buildEnsureComposerInstalledFragment()
+            ." && if [ -f artisan ]; then "
             ."php artisan optimize:clear || true; "
             ."php artisan config:clear || true; "
             ."echo 'Laravel migration context:'; "
@@ -515,6 +539,26 @@ class StackForm extends Component
             ."else echo 'ERROR: migrations failed'; echo 'Failed at: php artisan migrate --force'; sed -n '1,500p' \"\$MIGRATION_OUTPUT_FILE\"; exit 1; fi; "
             ."else echo 'artisan file not found'; exit 1; fi"
         );
+    }
+
+    /**
+     * Shell fragment that ensures vendor/autoload.php exists before any
+     * artisan/composer action runs. Used by Run migrations and Clear Cache
+     * All so they recover gracefully when the laravel container boot failed
+     * to populate vendor/ (interrupted deploy, volume mount issue, etc.).
+     * Keeping the fragment in a single helper means both buttons have the
+     * exact same recovery behaviour and the tests only need to lock one
+     * set of sentinel strings.
+     */
+    private function buildEnsureComposerInstalledFragment(): string
+    {
+        return "if [ ! -f vendor/autoload.php ]; then "
+            ."if [ ! -f composer.json ]; then echo 'ERROR: vendor/autoload.php is missing and composer.json was not found in /var/www/html.'; echo 'Redeploy the service from Coolify so the entrypoint can clone the repository first.'; exit 1; fi; "
+            ."echo 'vendor/autoload.php missing — installing PHP dependencies automatically before continuing.'; "
+            ."if ! composer install --no-interaction --prefer-dist --optimize-autoloader >/tmp/coolify-composer-install.log 2>&1; then "
+            ."echo 'ERROR: composer install failed'; echo 'Failed at: composer install (auto-recovery)'; sed -n '1,500p' /tmp/coolify-composer-install.log; exit 1; fi; "
+            ."echo 'Composer dependencies installed.'; "
+            ."fi";
     }
 
     public function runLaravelMaintenanceCommand(string $commandName): void
@@ -568,7 +612,9 @@ class StackForm extends Component
         }
 
         $this->runFrontendAssetCommand(
-            "cd /var/www/html && if [ -f artisan ]; then "
+            "cd /var/www/html && "
+            .$this->buildEnsureComposerInstalledFragment()
+            ." && if [ -f artisan ]; then "
             ."echo 'Running Laravel maintenance command:'; "
             ."echo ".escapeshellarg($selectedCommand['label'])."; "
             ."MAINTENANCE_OUTPUT_FILE=/tmp/coolify-maintenance-command.log; "
