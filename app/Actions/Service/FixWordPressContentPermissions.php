@@ -261,6 +261,22 @@ class FixWordPressContentPermissions
             // rest via `set -e` (the wrapper still captures the code).
             'set -e',
             'cd /var/www/html',
+            // FS_METHOD=direct injection into wp-config.php. Without
+            // this define WordPress inspects the filesystem to decide
+            // which WP_Filesystem_* class to use, and on containers
+            // where wp-content is technically writable but ownership
+            // does not match the PHP process uid the detection falls
+            // back to WP_Filesystem_FTPext → "Connection Information"
+            // modal asking the user for FTP credentials. Forcing
+            // `direct` tells WordPress to always use the plain PHP
+            // file functions, which work as soon as the wp-content
+            // chown/chmod below lands. The snippet is idempotent via
+            // `grep -q FS_METHOD` — running this action N times
+            // produces the same wp-config.php after the first run.
+            // We take a timestamped backup the first time we touch
+            // the file so a panicked operator can always undo.
+            'echo "→ wp-config.php: ensuring FS_METHOD=direct is defined"',
+            'if [ -f wp-config.php ] && ! grep -q FS_METHOD wp-config.php 2>/dev/null; then cp wp-config.php "wp-config.php.coolify-bk-$(date +%s)" && printf "\n/* Added by Coolify FixWordPressContentPermissions */\ndefine(\'FS_METHOD\', \'direct\');\n" >> wp-config.php && echo "→ wp-config.php: added FS_METHOD=direct (backup saved)"; elif [ -f wp-config.php ]; then echo "→ wp-config.php: FS_METHOD already present"; else echo "→ wp-config.php: not found, skipping FS_METHOD injection"; fi',
             'echo "→ chown -R www-data:www-data wp-content"',
             'chown -R www-data:www-data wp-content',
             'echo "→ chmod 755 directories"',

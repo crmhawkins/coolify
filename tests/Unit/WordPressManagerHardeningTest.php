@@ -45,6 +45,36 @@ it('builds an inner script with every step from the briefing', function () {
         ->toContain('__WRITE_TEST_OK__');
 });
 
+it('injects FS_METHOD=direct into wp-config.php before touching permissions', function () {
+    $script = FixWordPressContentPermissions::make()->buildInnerScript();
+
+    expect($script)
+        // Lock the exact define literal so nothing downstream rewrites
+        // it into a variation WordPress no longer recognises.
+        ->toContain("define('FS_METHOD', 'direct');")
+        // Idempotency guard: the grep check must run before the append
+        // so a second invocation is a no-op and wp-config.php does not
+        // accumulate duplicate defines.
+        ->toContain('grep -q FS_METHOD wp-config.php')
+        // Backup must happen before the edit so a panicked operator
+        // can always undo. Timestamped suffix keeps every run distinct.
+        ->toContain('wp-config.php.coolify-bk-$(date +%s)')
+        // User-facing output the Livewire panel prints to confirm the
+        // three possible branches (added / already present / missing).
+        ->toContain('FS_METHOD=direct (backup saved)')
+        ->toContain('FS_METHOD already present')
+        ->toContain('not found, skipping FS_METHOD injection');
+
+    // Ordering: the FS_METHOD block must sit BEFORE the chown block,
+    // so wp-config.php already forces direct mode by the time the
+    // permissions step completes and the admin UI reloads.
+    $fsPos = strpos($script, 'FS_METHOD');
+    $chownPos = strpos($script, 'chown -R www-data:www-data wp-content');
+    expect($fsPos)->toBeGreaterThan(0);
+    expect($chownPos)->toBeGreaterThan(0);
+    expect($fsPos)->toBeLessThan($chownPos);
+});
+
 it('exposes a stable failure sentinel constant', function () {
     expect(FixWordPressContentPermissions::FAILURE_SENTINEL)
         ->toBe('__COOLIFY_FIX_WP_PERMS_FAILED__');
