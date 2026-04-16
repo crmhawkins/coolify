@@ -81,6 +81,18 @@
             placeholder="My super WordPress site" />
         <x-forms.input canGate="update" :canResource="$service" id="description" label="Description" />
     </div>
+    {{-- Laravel APP_NAME editable inline. Only shown when the template
+         exposed SERVICE_LARAVEL_APP_NAME as a field (laravel-rootkit
+         stack). Saves on change via Save button below — writes through
+         to the env var, which the entrypoint then upserts into the
+         .env of the Laravel container on next request / redeploy. --}}
+    @if ($this->isLaravelRootkitStack() && $fields->has('SERVICE_LARAVEL_APP_NAME'))
+        <div class="w-full max-w-md">
+            <x-forms.input canGate="update" :canResource="$service" id="fields.SERVICE_LARAVEL_APP_NAME.value"
+                label="APP_NAME (Laravel)" placeholder="Polako"
+                helper="Laravel APP_NAME env var. Applied on the next deploy / redeploy so the Laravel app picks it up from its bootstrapped config." />
+        </div>
+    @endif
     <div class="w-96">
         <x-forms.checkbox canGate="update" :canResource="$service" instantSave id="connectToDockerNetwork"
             label="Connect To Predefined Network"

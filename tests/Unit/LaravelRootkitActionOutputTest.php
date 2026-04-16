@@ -291,6 +291,31 @@ it('guards git operations against dubious ownership and interactive prompts', fu
         ->toContain('HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured.');
 });
 
+it('exposes SERVICE_LARAVEL_APP_NAME so operators can edit APP_NAME inline in the stack form', function () {
+    $template  = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
+    $blade     = file_get_contents(__DIR__.'/../../resources/views/livewire/project/service/stack-form.blade.php');
+
+    // The compose env block references the field via the SERVICE_*
+    // convention, falling back to the original hardcoded default so
+    // legacy services keep the same label after the upgrade.
+    expect($template)
+        ->toContain('APP_NAME=${SERVICE_LARAVEL_APP_NAME:-Laravel RootKit}')
+        // The entrypoint must upsert APP_NAME into the project .env so
+        // Laravel actually uses the new label — just passing the env
+        // var to the process is not enough because artisan config:cache
+        // reads .env at build time.
+        ->toContain('if [ -n "${APP_NAME:-}" ]; then')
+        ->toContain('upsert_env "APP_NAME" "${APP_NAME}"');
+
+    // The blade form renders the input only for Laravel Rootkit stacks
+    // where the template actually exposed the field, and it sits right
+    // after Service Name / Description for discoverability.
+    expect($blade)
+        ->toContain("\$this->isLaravelRootkitStack() && \$fields->has('SERVICE_LARAVEL_APP_NAME')")
+        ->toContain('id="fields.SERVICE_LARAVEL_APP_NAME.value"')
+        ->toContain('APP_NAME (Laravel)');
+});
+
 it('hardens laravel rootkit boot pipeline so broken deploys surface as unhealthy', function () {
     $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
 

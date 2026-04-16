@@ -1267,6 +1267,16 @@ services:
           }
 
           upsert_env "APP_URL" "${SERVICE_PUBLIC_URL_RUNTIME}"
+          # APP_NAME is exposed as SERVICE_LARAVEL_APP_NAME via the
+          # Coolify UI. We upsert it into .env so Laravel reads the
+          # user-chosen label (shown in the browser tab title, mails,
+          # login view, etc) instead of the hardcoded "Laravel RootKit"
+          # default. If the env var arrives empty (service created
+          # before this field existed) we leave whatever is already in
+          # .env intact.
+          if [ -n "${APP_NAME:-}" ]; then
+            upsert_env "APP_NAME" "${APP_NAME}"
+          fi
           # Keep assets on same host/domain as current request.
           # This avoids cert/domain mismatch when service internal URLs differ.
           upsert_env "ASSET_URL" ""
@@ -1383,7 +1393,12 @@ services:
       # not attach a second FQDN to the laravel row.
       - SERVICE_FQDN_NGINX=${SERVICE_FQDN_NGINX:-}
       - SERVICE_FQDN_NGINX_80=${SERVICE_FQDN_NGINX_80:-}
-      - APP_NAME=Laravel RootKit
+      # APP_NAME is exposed as SERVICE_LARAVEL_APP_NAME so Coolify renders
+      # it as an editable field in the UI (same pattern as APP_ENV below).
+      # The default keeps backwards compat with existing services that
+      # never set the variable explicitly — they still boot with the
+      # original "Laravel RootKit" label.
+      - APP_NAME=${SERVICE_LARAVEL_APP_NAME:-Laravel RootKit}
       - APP_ENV=${SERVICE_LARAVEL_APP_ENV:-production}
       - APP_DEBUG=${SERVICE_LARAVEL_APP_DEBUG:-false}
       - LOG_CHANNEL=stack
