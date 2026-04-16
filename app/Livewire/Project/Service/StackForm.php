@@ -575,9 +575,30 @@ class StackForm extends Component
         $this->runFrontendAssetCommand(
             "cd /var/www/html && "
             .$this->buildEnsureComposerInstalledFragment()
+            // Defensive: if a migration introduced in the repo requires
+            // a PHP extension (e.g. ext-soap for a verifactu-related
+            // migration, ext-mbstring for string helpers used in a
+            // data-shuffle migration) and the container was never
+            // recreated since that commit landed, `migrate` would crash
+            // with an obscure "call to undefined function" at the first
+            // statement. The same helper Deploy cambios uses handles
+            // this: parser reads composer.json + composer.lock, installs
+            // only what's missing, idempotent.
+            ." && ".$this->buildEnsureExtensionsInstalledFragment()
             ." && if [ -f artisan ]; then "
-            ."php artisan optimize:clear || true; "
-            ."php artisan config:clear || true; "
+            ."php artisan optimize:clear --no-ansi || true; "
+            ."php artisan config:clear --no-ansi || true; "
+            // Re-run package discovery. Some packages ship migrations
+            // via ServiceProvider::loadMigrationsFrom() and are only
+            // visible to `migrate` after package:discover writes
+            // bootstrap/cache/packages.php. If composer install's
+            // post-script was skipped (common after the composer.lock
+            // hash cache shortcut) or cleared by optimize:clear above,
+            // those migrations would silently not run. We run with
+            // `|| true` because package:discover failing is never
+            // reason to block a migration — it would just mean some
+            // package migrations stay invisible.
+            ."php artisan package:discover --no-ansi >/dev/null 2>&1 || true; "
             ."echo 'Laravel migration context:'; "
             .'echo "APP_ENV=${APP_ENV:-}"; '
             .'echo "DB_CONNECTION=${DB_CONNECTION:-}"; '
@@ -588,11 +609,27 @@ class StackForm extends Component
             .'echo "CACHE_STORE=${CACHE_STORE:-}"; '
             .'echo "QUEUE_CONNECTION=${QUEUE_CONNECTION:-}"; '
             ."echo 'Migration status before run:'; "
-            ."php artisan migrate:status --no-ansi || true; "
+            ."php artisan migrate:status --no-ansi 2>&1 || true; "
             ."MIGRATION_OUTPUT_FILE=/tmp/coolify-migrate-output.log; "
             ."if php artisan migrate --force --no-ansi >\"\$MIGRATION_OUTPUT_FILE\" 2>&1; then "
-            ."if [ -s \"\$MIGRATION_OUTPUT_FILE\" ]; then echo 'Migrations completed with output:'; sed -n '1,500p' \"\$MIGRATION_OUTPUT_FILE\"; else echo 'Migrations completed successfully with no warnings.'; fi; "
-            ."else echo 'ERROR: migrations failed'; echo 'Failed at: php artisan migrate --force'; sed -n '1,500p' \"\$MIGRATION_OUTPUT_FILE\"; exit 1; fi; "
+            // 2000 is a safe ceiling: Laravel prints ~2 lines per migration,
+            // so 2000 covers ~1000 migrations in one batch — plenty even
+            // for CRMs with a decade of schema evolution. The old 500-line
+            // cap truncated the output on heavy first-time deploys.
+            ."if [ -s \"\$MIGRATION_OUTPUT_FILE\" ]; then echo 'Migrations completed with output:'; sed -n '1,2000p' \"\$MIGRATION_OUTPUT_FILE\"; else echo 'Migrations completed successfully with no warnings.'; fi; "
+            // Post-run status is the quickest way for the operator to
+            // confirm that every previously-Pending row now reads "Yes"
+            // under Ran? — no need to go digging in migrate:status
+            // separately.
+            ."echo ''; echo 'Migration status after run:'; "
+            ."php artisan migrate:status --no-ansi 2>&1 || true; "
+            ."else echo 'ERROR: migrations failed'; echo 'Failed at: php artisan migrate --force'; sed -n '1,2000p' \"\$MIGRATION_OUTPUT_FILE\"; "
+            // Actionable hint for the two most common migration
+            // failures we actually hit in this fork's CRMs.
+            ."if grep -qE 'Duplicate entry .0. for key .PRIMARY.' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: a PRIMARY KEY column lost its AUTO_INCREMENT attribute (common after restoring from a dump). Fix with: ALTER TABLE <table> MODIFY <pk_col> BIGINT UNSIGNED NOT NULL AUTO_INCREMENT;'; fi; "
+            ."if grep -qE 'SQLSTATE\\[HY000\\] \\[1049\\]' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: the database does not exist. Check DB_DATABASE matches the MariaDB container env, and that Coolify created the DB on first boot.'; fi; "
+            ."if grep -qE 'SQLSTATE\\[HY000\\] \\[200[2-3]\\]' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: cannot connect to the database. Check DB_HOST / DB_PORT and that the mariadb container is Running (healthy).'; fi; "
+            ."exit 1; fi; "
             ."else echo 'artisan file not found'; exit 1; fi"
         );
     }

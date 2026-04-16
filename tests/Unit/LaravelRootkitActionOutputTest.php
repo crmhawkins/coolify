@@ -9,6 +9,7 @@ it('reports deployed commits and focused failure stages in rootkit stack actions
         ->toContain('Failed at: composer install')
         ->toContain('Failed at: npm install/build')
         ->toContain('Migration status before run:')
+        ->toContain('Migration status after run:')
         ->toContain('Migrations completed successfully with no warnings.')
         ->toContain('Failed at: php artisan migrate --force')
         ->toContain('runLaravelMaintenanceCommand')
@@ -22,6 +23,36 @@ it('reports deployed commits and focused failure stages in rootkit stack actions
         ->toContain('php artisan cache:clear')
         ->toContain('php artisan route:clear')
         ->toContain('php artisan view:clear');
+});
+
+it('run migrations handles package discovery, extension check, and common failure hints', function () {
+    $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($stackFormFile)
+        // package:discover regenerates bootstrap/cache/packages.php so
+        // migrations registered via ServiceProvider::loadMigrationsFrom()
+        // (typical of spatie, barryvdh, squareetlabs packages) are
+        // visible to the migrate command even if composer's post-script
+        // was skipped by the composer.lock hash cache shortcut.
+        ->toContain('php artisan package:discover --no-ansi')
+        // The extension installer runs before migrate so a migration
+        // that uses an extension not yet loaded (e.g. a migration that
+        // uses mb_convert_encoding or dom helpers) does not crash with
+        // "call to undefined function". Reuses the same helper as
+        // Deploy cambios so migrate and deploy converge on extension
+        // state over time.
+        ->toContain('buildEnsureExtensionsInstalledFragment')
+        // Output limit lifted from 500 to 2000 lines so first-time
+        // migrations on CRMs with 100+ migrations do not get truncated.
+        ->toContain("sed -n '1,2000p'")
+        // Actionable hints for the three failure modes we actually hit
+        // in production on this fork:
+        //   1. action_scheduler_logs / dumped PK without AUTO_INCREMENT
+        //   2. unknown database (DB_DATABASE mismatch)
+        //   3. connection refused (mariadb not ready / wrong DB_HOST)
+        ->toContain("a PRIMARY KEY column lost its AUTO_INCREMENT attribute")
+        ->toContain('the database does not exist')
+        ->toContain('cannot connect to the database');
 });
 
 it('hardens deployLaravelChanges against dubious ownership, broken .git and missing vendor', function () {
