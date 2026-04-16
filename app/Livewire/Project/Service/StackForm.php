@@ -436,12 +436,24 @@ class StackForm extends Component
         $cleanRepoUrl = $this->buildCleanGithubHttpsUrl($repoUrl);
 
         // Build the `-c http.extraHeader=...` fragment we splice into the
-        // single fetch invocation when a token is present. escapeshellarg
-        // wraps the whole header so colons and spaces inside the value
-        // (e.g. "Authorization: Bearer ghp_xxx") are quoted safely.
+        // fetch invocation when a token is present. We use Basic auth with
+        // a base64-encoded `x-access-token:<pat>` because that is the
+        // format GitHub's git HTTPS smart transport reliably accepts on
+        // every PAT type (classic ghp_*, fine-grained github_pat_*, app
+        // tokens ghs_*/ghu_*). The older `Authorization: Bearer` form is
+        // honored by the REST API but git's smart transport on older git
+        // versions rejects it silently and falls through to the password
+        // prompt, which combined with GIT_TERMINAL_PROMPT=0 produces the
+        // misleading "could not read Username" error even for public
+        // repos where the token was merely unnecessary. This matches the
+        // auth scheme the entrypoint uses at container boot, so Deploy
+        // cambios and the entrypoint behave consistently.
+        //
+        // escapeshellarg wraps the whole header so the base64 "=" padding
+        // and the colon after "Authorization:" are quoted safely.
         $fetchConfigFragment = '';
         if ($githubToken !== '') {
-            $authHeader = 'Authorization: Bearer '.$githubToken;
+            $authHeader = 'Authorization: Basic '.base64_encode('x-access-token:'.$githubToken);
             $fetchConfigFragment = '-c http.extraHeader='.escapeshellarg($authHeader).' ';
         }
 
@@ -481,14 +493,34 @@ class StackForm extends Component
             // error (auth, network, unknown branch, dubious ownership…)
             // surfaces in the UI instead of a bare "git fetch failed".
             ." && GIT_FETCH_LOG=/tmp/coolify-git-fetch.log; : >\"\$GIT_FETCH_LOG\""
-            ." && if ! git {$fetchConfigFragment}fetch origin ".escapeshellarg($branch)." >\"\$GIT_FETCH_LOG\" 2>&1; then echo 'ERROR: git fetch failed'; echo 'Failed at: git fetch origin ".addslashes($branch)."'; sed -n '1,200p' \"\$GIT_FETCH_LOG\"; "
-            // Surface the most common root cause (no/expired GitHub token
-            // on a private repo) with a one-line actionable hint. We only
-            // print it when git's stderr matches the known "could not read
-            // Username" signature so public-repo network failures are not
-            // drowned in a misleading "set your token" message.
-            ."if grep -q 'could not read Username' \"\$GIT_FETCH_LOG\" 2>/dev/null; then echo 'HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured. Set SERVICE_GITHUB_TOKEN in the Coolify service environment and try again.'; fi; "
-            ."exit 1; fi"
+            // Fetch with fallback: when a token is configured we try the
+            // authenticated fetch first, and on failure we retry without
+            // any auth header. That second attempt covers the common
+            // "public repo with an expired/invalid token" case — the
+            // token is unnecessary for the fetch itself, but git still
+            // sends it and the server rejects it, causing the auth
+            // prompt to fire. Falling back to the anonymous fetch lets
+            // the deploy succeed instead of aborting. If both attempts
+            // fail we surface the original (authenticated) error output
+            // plus an actionable hint. When no token is configured we
+            // skip straight to the anonymous fetch so public repos keep
+            // working without any extra config.
+            .($fetchConfigFragment !== ''
+                ? " && if ! git {$fetchConfigFragment}fetch origin ".escapeshellarg($branch)." >\"\$GIT_FETCH_LOG\" 2>&1; then "
+                    ."echo '→ git fetch with SERVICE_GITHUB_TOKEN failed, retrying anonymously (works for public repos)...'; "
+                    ."if ! git fetch origin ".escapeshellarg($branch)." >>\"\$GIT_FETCH_LOG\" 2>&1; then "
+                    ."echo 'ERROR: git fetch failed'; echo 'Failed at: git fetch origin ".addslashes($branch)."'; "
+                    ."sed -n '1,200p' \"\$GIT_FETCH_LOG\"; "
+                    ."if grep -q 'could not read Username' \"\$GIT_FETCH_LOG\" 2>/dev/null; then echo 'HINT: the anonymous fallback also failed. The repository is private and your SERVICE_GITHUB_TOKEN is either missing, expired, or lacks Contents:read scope on this repo. Regenerate the token in GitHub and paste it in the Coolify service environment.'; fi; "
+                    ."exit 1; fi; "
+                    ."echo '→ anonymous fetch succeeded — token was unnecessary or invalid (repo is public).'; "
+                    ."fi"
+                : " && if ! git fetch origin ".escapeshellarg($branch)." >\"\$GIT_FETCH_LOG\" 2>&1; then "
+                    ."echo 'ERROR: git fetch failed'; echo 'Failed at: git fetch origin ".addslashes($branch)."'; "
+                    ."sed -n '1,200p' \"\$GIT_FETCH_LOG\"; "
+                    ."if grep -q 'could not read Username' \"\$GIT_FETCH_LOG\" 2>/dev/null; then echo 'HINT: the repository looks private. Set SERVICE_GITHUB_TOKEN in the Coolify service environment and try again.'; fi; "
+                    ."exit 1; fi"
+            )
             ." && TARGET_HEAD=\"\$(git rev-parse ".escapeshellarg($branchRef)." 2>/dev/null || true)\""
             ." && if [ -z \"\$TARGET_HEAD\" ]; then echo 'ERROR: Unable to resolve target commit from remote branch.'; exit 1; fi"
             ." && if [ -n \"\$CURRENT_HEAD\" ] && [ \"\$CURRENT_HEAD\" = \"\$TARGET_HEAD\" ]; then echo 'No new commits to deploy.'; else echo 'New commits deployed:'; if [ -n \"\$CURRENT_HEAD\" ]; then git log --reverse --format='%h %s (%an)' \"\$CURRENT_HEAD..\$TARGET_HEAD\"; else git log --reverse --format='%h %s (%an)' -n 10 \"\$TARGET_HEAD\"; fi; fi"

@@ -112,22 +112,42 @@ it('deploy cambios auto-installs missing ext-* from composer.lock before compose
 it('deploy cambios keeps working on public repos whether or not a GitHub token is set', function () {
     $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
 
-    // The http.extraHeader Authorization injection only runs when a
-    // token is present — otherwise the fetch is anonymous. GitHub
-    // accepts Authorization: Bearer headers on public repos too, so a
-    // user who configures a token for a public repo gets the same
-    // working fetch (and their rate limits bump to the authenticated
-    // ceiling as a free bonus).
     expect($stackFormFile)
         ->toContain("if (\$githubToken !== '')")
-        ->toContain("'Authorization: Bearer '.\$githubToken")
+        // GitHub's git HTTPS smart transport reliably accepts Basic
+        // auth with base64(x-access-token:<pat>), matching the
+        // scheme the template entrypoint uses. The older Bearer
+        // form would get silently rejected on some git versions and
+        // trigger the "could not read Username" prompt even for
+        // public repos where the token was unnecessary.
+        ->toContain("'Authorization: Basic '.base64_encode('x-access-token:'.\$githubToken)")
         ->toContain('-c http.extraHeader=')
+        ->not->toContain("'Authorization: Bearer '.\$githubToken")
         // The ordering must be: fetch-config fragment is built BEFORE
         // the command string, then spliced via {$fetchConfigFragment}
         // inside the single fetch call. No other shell command should
         // leak the raw token into .git/config.
         ->toContain('git remote set-url origin')
         ->not->toContain('git remote set-url origin https://x-access-token');
+});
+
+it('deploy cambios retries anonymously when the token fetch fails on a public repo', function () {
+    $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($stackFormFile)
+        // The two-attempt fetch block is only emitted when a token is
+        // present at build time — without a token we skip straight to
+        // the anonymous fetch. Lock both branches so refactors cannot
+        // silently drop the fallback.
+        ->toContain('retrying anonymously (works for public repos)')
+        ->toContain('anonymous fetch succeeded — token was unnecessary or invalid (repo is public).')
+        // On total failure the HINT should distinguish "token wrong"
+        // from "token missing": we already tried anonymous, so the
+        // user knows it's not a "set the token" issue but a token
+        // validity/scope issue OR the repo actually is private.
+        ->toContain('The repository is private and your SERVICE_GITHUB_TOKEN is either missing, expired, or lacks Contents:read scope on this repo.')
+        // The no-token branch keeps the original simpler HINT.
+        ->toContain('HINT: the repository looks private. Set SERVICE_GITHUB_TOKEN in the Coolify service environment and try again.');
 });
 
 it('configures laravel rootkit to use file cache and guarded schedule run mode', function () {
