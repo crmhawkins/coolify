@@ -158,21 +158,33 @@ it('deploys with a clean (tokenless) origin URL and injects token via http.extra
 });
 
 /* -----------------------------------------------------------------
- | L2 — Artisan run dialog. Enter must go through confirm, and the
- | explicit Ejecutar button must have wire:confirm as a second layer.
+ | L2 — Artisan run button: direct execution without confirm dialog.
+ | The pre-execution confirm was removed at operator request because
+ | the panel is already gated by the service's update capability and
+ | the extra dialog was friction for power users running migrate /
+ | optimize:clear / cache:clear repeatedly. This test locks in the
+ | "no confirmation" behaviour so a future refactor does not
+ | re-introduce the dialog.
  | ----------------------------------------------------------------- */
 
-it('guards the LaravelArtisan run button + Enter key with a confirm dialog', function () {
+it('does not guard the LaravelArtisan run button with a confirm dialog', function () {
     $blade = file_get_contents(__DIR__.'/../../'.('resources/views/livewire/project/service/laravel-artisan.blade.php'));
 
-    // Enter uses an Alpine-side confirm so the Livewire modal does
-    // not swallow the keystroke — see the wrapper's confirmAndRun().
-    expect($blade)->toContain('confirmAndRun()');
+    // The old Alpine wrapper is gone: Enter on the input dispatches
+    // $wire.run() directly, which is the same method the button
+    // click-binding triggers.
+    expect($blade)->not->toContain('confirmAndRun()');
+    expect($blade)->toContain('x-on:keydown.enter.prevent="$wire.run()"');
 
-    // The Ejecutar button gets wire:confirm as defense in depth.
-    expect($blade)->toContain('wire:confirm="¿Ejecutar el comando artisan');
+    // The Ejecutar button no longer ships wire:confirm — a click runs
+    // the command straight away.
+    expect($blade)->not->toContain('wire:confirm="¿Ejecutar el comando artisan');
 
-    // And the old bare wire:keydown.enter.prevent="run" is gone.
+    // Defensive: the original bare wire:keydown.enter.prevent="run"
+    // should never have shipped and must stay gone (Livewire swallows
+    // the keystroke on `wire:keydown.enter.prevent="run"` with debounced
+    // wire:model inputs, which was the original reason we moved the
+    // Enter handling to x-on:keydown).
     expect($blade)->not->toContain('wire:keydown.enter.prevent="run"');
 });
 
