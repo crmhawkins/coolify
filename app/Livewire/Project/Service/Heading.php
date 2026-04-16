@@ -159,33 +159,72 @@ class Heading extends Component
     }
 
     /**
-     * Lightweight restart: issues `docker restart` on each container
-     * that belongs to this service (applications + databases) without
-     * rebuilding or re-running the deploy pipeline. Use when a single
-     * container has gone unhealthy and you just want to kick it, not
-     * when you actually changed config or code.
+     * Restart the whole compose stack. Before this change the button
+     * only issued `docker restart` on each container that the Service
+     * model tracked — a plain `docker restart` needs the container to
+     * exist, so any service where one container had exited-and-been-
+     * removed (crash, manual rm, docker cleanup) could not be brought
+     * back without a full Redeploy. That was the operator complaint:
+     * "if a service is down, restart should bring it up".
+     *
+     * The fix uses compose commands against the project directory so
+     * missing containers are recreated from the existing compose file
+     * and running ones are cycled:
+     *
+     *   1. `docker compose up -d --no-recreate` — creates any missing
+     *      container from the compose file and starts any exited one,
+     *      WITHOUT rebuilding existing running containers. Cheap and
+     *      safe on already-healthy services.
+     *   2. `docker compose restart` — cycles every container in the
+     *      stack, guaranteeing workers pick up rotated config / env
+     *      / php.ini changes applied since their last start.
+     *
+     * Volumes and persisted data are untouched: we never `down` the
+     * project, never `rm` containers, never touch named volumes.
+     * Environment variables come from the Coolify-generated .env which
+     * is not regenerated here — operators who changed a compose env
+     * and want it picked up should use Redeploy (which re-parses the
+     * compose file).
      */
     public function restart()
     {
         try {
-            $restarted = 0;
-            foreach ($this->service->applications as $application) {
-                $application->restart();
-                $restarted++;
-            }
-            foreach ($this->service->databases as $database) {
-                $database->restart();
-                $restarted++;
-            }
-
-            if ($restarted === 0) {
-                $this->dispatch('warning', 'No hay contenedores que reiniciar.');
+            $server = $this->service->destination?->server ?? $this->service->server;
+            if (! $server) {
+                $this->dispatch('error', 'No server attached to this service.');
 
                 return;
             }
 
-            $noun = $restarted === 1 ? 'contenedor reiniciado' : 'contenedores reiniciados';
-            $this->dispatch('success', "{$restarted} {$noun}.");
+            $workdir = $this->service->workdir();
+            if (empty($workdir)) {
+                $this->dispatch('error', 'Could not resolve service working directory.');
+
+                return;
+            }
+
+            $totalContainers = $this->service->applications->count() + $this->service->databases->count();
+            if ($totalContainers === 0) {
+                $this->dispatch('warning', 'No hay contenedores que reiniciar en este servicio.');
+
+                return;
+            }
+
+            // Single SSH call with `&&` chaining: if `up -d` fails we do
+            // not try `restart` on a half-baked stack. Both commands log
+            // to the Coolify activity log via instant_remote_process so
+            // a failure surfaces in the UI with the real docker error.
+            $command = "cd {$workdir}"
+                ." && docker compose --project-directory {$workdir} up -d --no-recreate"
+                ." && docker compose --project-directory {$workdir} restart";
+
+            instant_remote_process([$command], $server, false);
+
+            $noun = $totalContainers === 1 ? 'contenedor' : 'contenedores';
+            $this->dispatch(
+                'success',
+                "{$totalContainers} {$noun} reiniciados (se han levantado también los que estaban parados o eliminados)."
+            );
         } catch (\Throwable $e) {
             $this->dispatch('error', 'Error reiniciando contenedores: '.$e->getMessage());
         }

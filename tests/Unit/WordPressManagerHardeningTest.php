@@ -139,6 +139,35 @@ it('does NOT wire the auto-run into Heading::restart (docker restart, no rebuild
     expect($m[0])->not->toContain('scheduleWordPressPermissionsFix');
 });
 
+it('Heading::restart brings down containers back up via docker compose', function () {
+    $source = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/Heading.php');
+
+    // Isolate restart() so a subsequent method using compose does not
+    // cause a false pass.
+    preg_match('/public function restart\(\).*?(?=public function )/s', $source, $m);
+    expect(isset($m[0]))->toBeTrue('restart() method should exist');
+    $body = $m[0];
+
+    expect($body)
+        // The new flow must use the two-step compose approach: up -d
+        // with --no-recreate creates/starts any missing or exited
+        // container, then restart cycles the whole stack. Either part
+        // alone leaves operators in the same hole that motivated the
+        // fix (crashed containers never come back from a bare docker
+        // restart).
+        ->toContain('docker compose --project-directory')
+        ->toContain('up -d --no-recreate')
+        ->toContain('docker compose --project-directory ')
+        ->toContain('restart')
+        // Must NOT revert to the per-container $application->restart()
+        // loop that fails on removed containers.
+        ->not->toContain('$application->restart()')
+        ->not->toContain('$database->restart()')
+        // Success message should reflect that stopped containers also
+        // came back up — operators need to know this was fixed.
+        ->toContain('los que estaban parados o eliminados');
+});
+
 /* -----------------------------------------------------------------
  | Job: FixWordPressContentPermissionsJob
  | ----------------------------------------------------------------- */
