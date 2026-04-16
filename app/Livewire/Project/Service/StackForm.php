@@ -497,6 +497,15 @@ class StackForm extends Component
             // Without it, `git checkout -B` aborts with "local changes would
             // be overwritten" on any second deploy.
             ." && if ! git checkout -f -B ".escapeshellarg($branch)." ".escapeshellarg($branchRef)."; then echo 'ERROR: git checkout failed'; exit 1; fi"
+            // Auto-install any ext-* platform requirements that the new
+            // commits introduced (e.g. a composer package that pulls in
+            // ext-soap). Without this block Deploy cambios would abort on
+            // composer install with "ext-X is missing from your system"
+            // and force the operator to do a full Redeploy just to install
+            // a library. The fragment reuses the same case map that the
+            // entrypoint runs at container boot so container state matches
+            // Deploy cambios state over time.
+            ." && ".$this->buildEnsureExtensionsInstalledFragment()
             // composer install runs whenever composer.json exists. We log
             // the "vendor/autoload.php missing" case explicitly so the
             // output panel makes it obvious that this deploy is installing
@@ -574,6 +583,173 @@ class StackForm extends Component
             ."echo 'ERROR: composer install failed'; echo 'Failed at: composer install (auto-recovery)'; sed -n '1,500p' /tmp/coolify-composer-install.log; exit 1; fi; "
             ."echo 'Composer dependencies installed.'; "
             ."fi";
+    }
+
+    /**
+     * Shell fragment that inspects composer.json + composer.lock, detects
+     * any ext-* platform requirements that are not yet loaded in the
+     * running container, and installs them via apk + docker-php-ext-install
+     * (or pecl) using the same recipe map that the entrypoint script has on
+     * first boot. Called from Deploy cambios right after git checkout so a
+     * push that adds a new dependency (for example a package that pulls in
+     * ext-soap) does not leave composer install stuck on a missing platform
+     * requirement until the operator does a full Redeploy.
+     *
+     * Idempotent: on the happy path (extensions already loaded) the fragment
+     * finishes in well under a second — it only loops over names that
+     * extension_loaded() reports as missing. On failure it exits 1 with an
+     * explicit "Redeploy from Coolify" hint so the user knows the fallback
+     * path that guarantees a clean install.
+     *
+     * Using a PHP nowdoc keeps single quotes inside the shell/PHP payload
+     * intact when the whole StackForm command is passed through docker exec
+     * sh -lc, which runs under escapeshellarg's single-quote wrapping.
+     */
+    private function buildEnsureExtensionsInstalledFragment(): string
+    {
+        return <<<'SHELL'
+if [ -f composer.json ]; then
+  REQUESTED_EXTS="$(php -r '
+$exts = [];
+$collect = function (array $reqs) use (&$exts) {
+    foreach (array_keys($reqs) as $k) {
+        if (is_string($k) && strpos($k, "ext-") === 0) {
+            $name = substr($k, 4);
+            if ($name !== "") { $exts[$name] = true; }
+        }
+    }
+};
+$j = @json_decode(@file_get_contents("composer.json"), true);
+if (is_array($j)) {
+    $collect((array) ($j["require"] ?? []));
+    $collect((array) ($j["require-dev"] ?? []));
+}
+$l = @json_decode(@file_get_contents("composer.lock"), true);
+if (is_array($l)) {
+    $collect((array) ($l["platform"] ?? []));
+    $collect((array) ($l["platform-dev"] ?? []));
+    foreach ((array) ($l["packages"] ?? []) as $p) { if (is_array($p)) { $collect((array) ($p["require"] ?? [])); } }
+    foreach ((array) ($l["packages-dev"] ?? []) as $p) { if (is_array($p)) { $collect((array) ($p["require"] ?? [])); } }
+}
+echo implode(" ", array_keys($exts));
+' 2>/dev/null || true)"
+  MISSING_NEW=""
+  for ext in $REQUESTED_EXTS; do
+    if ! php -r "exit(extension_loaded('$ext') ? 0 : 1);" 2>/dev/null; then
+      MISSING_NEW="$MISSING_NEW $ext"
+    fi
+  done
+  if [ -n "$MISSING_NEW" ]; then
+    echo "Deploy cambios: installing missing PHP extensions from composer.lock:$MISSING_NEW"
+    UNRESOLVABLE_EXTS=""
+    for ext in $MISSING_NEW; do
+      EXT_INSTALL_OK=0
+      set +e
+      case "$ext" in
+        imap)
+          apk add --no-cache imap-dev krb5-dev openssl-dev >/dev/null 2>&1
+          if docker-php-ext-configure imap --with-imap --with-imap-ssl >/dev/null 2>&1 \
+             && docker-php-ext-install -j"$(nproc)" imap >/dev/null 2>&1; then
+            EXT_INSTALL_OK=1
+          elif pecl install imap >/dev/null 2>&1 && docker-php-ext-enable imap >/dev/null 2>&1; then
+            EXT_INSTALL_OK=1
+          fi
+          ;;
+        soap)
+          apk add --no-cache libxml2-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" soap >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        ldap)
+          apk add --no-cache openldap-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" ldap >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        gd)
+          apk add --no-cache freetype-dev libjpeg-turbo-dev libpng-dev >/dev/null 2>&1
+          docker-php-ext-configure gd --with-freetype --with-jpeg >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" gd >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        zip)
+          apk add --no-cache libzip-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" zip >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        intl)
+          apk add --no-cache icu-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" intl >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        pdo_pgsql)
+          apk add --no-cache postgresql-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" pdo_pgsql >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        gmp)
+          apk add --no-cache gmp-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" gmp >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        bz2)
+          apk add --no-cache bzip2-dev >/dev/null 2>&1
+          docker-php-ext-install -j"$(nproc)" bz2 >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        imagick)
+          apk add --no-cache imagemagick imagemagick-dev libtool >/dev/null 2>&1
+          pecl install imagick >/dev/null 2>&1 && docker-php-ext-enable imagick >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        memcached)
+          apk add --no-cache libmemcached-dev zlib-dev cyrus-sasl-dev >/dev/null 2>&1
+          pecl install memcached >/dev/null 2>&1 && docker-php-ext-enable memcached >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        mongodb)
+          apk add --no-cache openssl-dev >/dev/null 2>&1
+          pecl install mongodb >/dev/null 2>&1 && docker-php-ext-enable mongodb >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        amqp)
+          apk add --no-cache rabbitmq-c-dev >/dev/null 2>&1
+          pecl install amqp >/dev/null 2>&1 && docker-php-ext-enable amqp >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        yaml)
+          apk add --no-cache yaml-dev >/dev/null 2>&1
+          pecl install yaml >/dev/null 2>&1 && docker-php-ext-enable yaml >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        decimal)
+          apk add --no-cache mpdecimal-dev >/dev/null 2>&1
+          pecl install decimal >/dev/null 2>&1 && docker-php-ext-enable decimal >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        swoole)
+          apk add --no-cache libstdc++ linux-headers >/dev/null 2>&1
+          pecl install swoole >/dev/null 2>&1 && docker-php-ext-enable swoole >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        xdebug|apcu|redis)
+          pecl install "$ext" >/dev/null 2>&1 && docker-php-ext-enable "$ext" >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        pdo_mysql|mysqli|bcmath|exif|mbstring|opcache|sockets|pcntl|calendar|sysvmsg|sysvsem|sysvshm)
+          docker-php-ext-install -j"$(nproc)" "$ext" >/dev/null 2>&1 && EXT_INSTALL_OK=1
+          ;;
+        *)
+          if docker-php-ext-install -j"$(nproc)" "$ext" >/dev/null 2>&1; then
+            EXT_INSTALL_OK=1
+          elif pecl install "$ext" >/dev/null 2>&1 && docker-php-ext-enable "$ext" >/dev/null 2>&1; then
+            EXT_INSTALL_OK=1
+          fi
+          ;;
+      esac
+      docker-php-ext-enable "$ext" >/dev/null 2>&1 || true
+      set -e
+      if [ "$EXT_INSTALL_OK" = "1" ] && php -r "exit(extension_loaded('$ext') ? 0 : 1);" 2>/dev/null; then
+        echo "  → ext-$ext installed"
+      else
+        UNRESOLVABLE_EXTS="$UNRESOLVABLE_EXTS $ext"
+      fi
+    done
+    if [ -n "$UNRESOLVABLE_EXTS" ]; then
+      echo "ERROR: extension install failed"
+      echo "Failed at: extension install"
+      echo "Could not install required PHP extensions:$UNRESOLVABLE_EXTS"
+      echo "Redeploy the service from Coolify (recreate container) for a full reinstall that can resolve deeper issues."
+      exit 1
+    fi
+    pkill -USR2 -f 'php-fpm: master' >/dev/null 2>&1 || true
+    echo "PHP extensions installed; php-fpm reloaded so new requests pick them up."
+  fi
+fi
+SHELL;
     }
 
     public function runLaravelMaintenanceCommand(string $commandName): void

@@ -68,6 +68,68 @@ it('auto-recovers missing vendor autoload in run migrations and clear cache all'
         ->toContain('vendor/autoload.php is missing and composer.json was not found');
 });
 
+it('deploy cambios auto-installs missing ext-* from composer.lock before composer install', function () {
+    $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($stackFormFile)
+        // Helper exists and is wired into deployLaravelChanges
+        ->toContain('buildEnsureExtensionsInstalledFragment')
+        ->toContain('Deploy cambios: installing missing PHP extensions from composer.lock:')
+        // The parser reads composer.lock (platform + every package's
+        // require map), not just composer.json, so transitive ext-*
+        // requirements (the polako → laravel-verifactu → ext-soap case)
+        // are picked up too.
+        ->toContain('composer.lock')
+        ->toContain('"platform"')
+        ->toContain('"platform-dev"')
+        ->toContain('"packages-dev"')
+        // Recipe coverage: the extensions that blocked real deploys
+        // (soap, imap) and the popular ones that need apk dev packages
+        // must all have a dedicated case so they don't fall through
+        // to the generic docker-php-ext-install that misses their
+        // dependencies (libxml2-dev for soap, imap-dev for imap, etc).
+        ->toContain('apk add --no-cache libxml2-dev')
+        ->toContain('docker-php-ext-install -j"$(nproc)" soap')
+        ->toContain('apk add --no-cache imap-dev krb5-dev openssl-dev')
+        ->toContain('docker-php-ext-configure imap --with-imap --with-imap-ssl')
+        ->toContain('apk add --no-cache openldap-dev')
+        ->toContain('apk add --no-cache postgresql-dev')
+        // redis, xdebug and apcu share a single pecl branch — they are
+        // pure pecl packages with no extra apk dependencies on Alpine.
+        ->toContain('xdebug|apcu|redis')
+        // Hard fail + actionable hint pointing at Redeploy when the
+        // installer can't resolve an extension. This prevents composer
+        // install from running against a broken PHP and producing
+        // misleading errors.
+        ->toContain('Could not install required PHP extensions:')
+        ->toContain('Redeploy the service from Coolify (recreate container) for a full reinstall')
+        // PHP-FPM is reloaded via USR2 at the end so running workers
+        // pick up the newly installed extensions without a full
+        // container restart.
+        ->toContain("pkill -USR2 -f 'php-fpm: master'");
+});
+
+it('deploy cambios keeps working on public repos whether or not a GitHub token is set', function () {
+    $stackFormFile = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    // The http.extraHeader Authorization injection only runs when a
+    // token is present — otherwise the fetch is anonymous. GitHub
+    // accepts Authorization: Bearer headers on public repos too, so a
+    // user who configures a token for a public repo gets the same
+    // working fetch (and their rate limits bump to the authenticated
+    // ceiling as a free bonus).
+    expect($stackFormFile)
+        ->toContain("if (\$githubToken !== '')")
+        ->toContain("'Authorization: Bearer '.\$githubToken")
+        ->toContain('-c http.extraHeader=')
+        // The ordering must be: fetch-config fragment is built BEFORE
+        // the command string, then spliced via {$fetchConfigFragment}
+        // inside the single fetch call. No other shell command should
+        // leak the raw token into .git/config.
+        ->toContain('git remote set-url origin')
+        ->not->toContain('git remote set-url origin https://x-access-token');
+});
+
 it('configures laravel rootkit to use file cache and guarded schedule run mode', function () {
     $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
 
