@@ -299,6 +299,30 @@ it('guards git operations against dubious ownership and interactive prompts', fu
         ->toContain('HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured.');
 });
 
+it('isolates /var/www/html/storage in its own named volume so uploads survive any redeploy', function () {
+    $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
+
+    expect($template)
+        // Named volume declaration at the compose top level.
+        ->toContain("\nvolumes:\n  laravel-files:\n")
+        ->toContain('laravel-storage:')
+        // Laravel service mounts both laravel-files (app code) AND
+        // laravel-storage (user uploads / PDFs / logs). The second
+        // mount shadows the storage subdir of laravel-files, which
+        // is exactly what we want: any git-clone wipe of
+        // laravel-files leaves laravel-storage untouched.
+        ->toContain('- laravel-files:/var/www/html')
+        ->toContain('- laravel-storage:/var/www/html/storage')
+        // Nginx must see storage too (read-only) so public/storage
+        // symlink requests resolve to real files instead of 404.
+        ->toContain('- laravel-files:/var/www/html:ro')
+        ->toContain('- laravel-storage:/var/www/html/storage:ro')
+        // storage:link runs with --force so a stale symlink pointing
+        // at a removed inode (after laravel-files recreation) is
+        // rebuilt in place.
+        ->toContain('php artisan storage:link --force 2>/dev/null || true');
+});
+
 it('propagates APP_NAME changes to the live Laravel .env on Save (no redeploy needed)', function () {
     $stackForm = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
 

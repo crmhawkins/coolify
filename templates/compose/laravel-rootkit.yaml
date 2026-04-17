@@ -9,6 +9,16 @@ services:
     image: php:${SERVICE_PHP_VERSION:-8.4}-fpm-alpine
     volumes:
       - laravel-files:/var/www/html
+      # Storage is deliberately split into its own named volume that
+      # mounts ON TOP OF /var/www/html/storage. laravel-files is
+      # recreated / wiped whenever the entrypoint re-clones the repo
+      # (missing .git, corrupted .git) and the `rm -rf * .[!.]*`
+      # step would otherwise take user uploads, generated PDFs and
+      # laravel.log with it. Keeping laravel-storage separate means
+      # any of those destructive paths on laravel-files leave
+      # storage/ untouched. Shared with nginx (read-only) so
+      # public/storage symlinks resolve to uploaded files.
+      - laravel-storage:/var/www/html/storage
       - type: bind
         source: ./supervisord.conf
         target: /etc/supervisord.conf
@@ -1312,12 +1322,13 @@ services:
             php artisan config:clear || true
             # Create the public/storage symlink so Laravel apps that
             # serve user uploads out of storage/app/public work out
-            # of the box. Idempotent: succeeds silently if the link
-            # already exists, and is a no-op if the project does
-            # not use the storage disk at all. `|| true` so a symlink
-            # that already exists (from the persisted volume on
-            # redeploy) does not abort the boot.
-            php artisan storage:link 2>/dev/null || true
+            # of the box. --force recreates the symlink even if it
+            # points at a stale target — common after recreating the
+            # laravel-files volume (the symlink survives inside the
+            # storage subdir but may point at a now-removed inode).
+            # `|| true` so a filesystem that rejects symlinks does
+            # not abort the whole boot.
+            php artisan storage:link --force 2>/dev/null || true
             DB_CONNECTION=mysql \
               DB_HOST=mariadb \
               DB_PORT=3306 \
@@ -1460,6 +1471,11 @@ services:
       - SERVICE_FQDN_NGINX_80
     volumes:
       - laravel-files:/var/www/html:ro
+      # Mount the storage volume read-only too so nginx can serve
+      # /storage/* requests that resolve through the public/storage
+      # symlink. Without this, uploaded logos/images live in the
+      # laravel container but nginx cannot see them.
+      - laravel-storage:/var/www/html/storage:ro
       - type: bind
         source: ./nginx-main.conf
         target: /etc/nginx/nginx.conf
@@ -1663,4 +1679,14 @@ services:
 
 volumes:
   laravel-files:
+  # Dedicated volume for /var/www/html/storage so user uploads,
+  # generated PDFs, laravel.log and the framework cache survive
+  # every git-clone wipe and force-recreate of the laravel-files
+  # volume. Coolify preserves named volumes across Redeploy by
+  # default — this second named volume just adds an extra layer
+  # of isolation: even if the operator mistakenly clicks "Force
+  # cleanup containers" (which wipes laravel-files) or the
+  # entrypoint's `rm -rf * .[!.]*` fires on a .git that went
+  # missing, the storage volume stays intact.
+  laravel-storage:
   mariadb-data:
