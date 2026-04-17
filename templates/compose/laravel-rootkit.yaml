@@ -1316,15 +1316,38 @@ services:
              echo "ASSET_URL=" >> .env
           fi
 
+          # upsert_env used to do the edit with sed, which does not
+          # quote the value and therefore produced broken .env lines
+          # like:
+          #     APP_NAME=HL Management
+          # that vlucas/phpdotenv refuses to parse with the error
+          # "Failed to parse dotenv file. Encountered unexpected
+          # whitespace at [HL Management]". Laravel then crashes its
+          # entire boot: config:cache fails, artisan commands fail,
+          # queue workers FATAL-state one after the other, php-fpm
+          # returns 500 on every request.
+          #
+          # The sed implementation also had pre-existing escape hell
+          # around `&` and `/` in replacements (sed treats `&` in the
+          # replacement as the whole match, so any `&` in a password
+          # or URL would explode) and around backslashes.
+          #
+          # New implementation delegates to PHP (already available in
+          # the container) which:
+          #   * Always wraps the value in double quotes, so whitespace
+          #     in APP_NAME and special chars in DB_PASSWORD are safe.
+          #   * Escapes only what phpdotenv actually cares about inside
+          #     double quotes: backslashes (\ → \\) and double quotes
+          #     (" → \"). Every other character is literal.
+          #   * preg_replace with an anchored pattern that uses
+          #     preg_quote on the key, so weird key names cannot
+          #     hijack the regex.
+          #   * No temp files; file_put_contents writes in place.
+          #
+          # Env vars are passed via `KEY=VAL php -r` (POSIX shell
+          # prefix) which scopes them to this single invocation.
           upsert_env() {
-            key="$1"
-            value="$2"
-            escaped_value=$(printf '%s\n' "$value" | sed 's/[\/&]/\\&/g')
-            if grep -Eq "^${key}=" .env; then
-              sed -i "s/^${key}=.*/${key}=${escaped_value}/" .env
-            else
-              echo "${key}=${value}" >> .env
-            fi
+            COOLIFY_UE_KEY="$1" COOLIFY_UE_VAL="$2" php -r '$file="/var/www/html/.env"; $key=(string)getenv("COOLIFY_UE_KEY"); $value=(string)getenv("COOLIFY_UE_VAL"); if ($key==="") { exit(0); } $escaped=str_replace(array("\\\\","\""), array("\\\\\\\\","\\\""), $value); $line=$key."=\"".$escaped."\""; if (!file_exists($file)) { file_put_contents($file,$line."\n"); exit(0); } $current=file_get_contents($file); $pattern="/^".preg_quote($key,"/")."=.*/m"; if (preg_match($pattern,$current)) { $new=preg_replace($pattern,$line,$current,1); } else { $new=rtrim($current,"\n")."\n".$line."\n"; } file_put_contents($file,$new);'
           }
 
           upsert_env "APP_URL" "${SERVICE_PUBLIC_URL_RUNTIME}"
