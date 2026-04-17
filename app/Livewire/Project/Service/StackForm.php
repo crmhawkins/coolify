@@ -188,6 +188,35 @@ class StackForm extends Component
             $this->validationAttributes['fields.SERVICE_GITHUB_TOKEN.value'] = 'GitHub Token';
         }
 
+        // APP_NAME backfill: services created before the template
+        // exposed APP_NAME as SERVICE_LARAVEL_APP_NAME (or created
+        // while templates/service-templates-latest.json was still
+        // cached with the old hardcoded literal) will not have an
+        // environment_variables row for this key, which means the
+        // blade guard `$fields->has('SERVICE_LARAVEL_APP_NAME')`
+        // evaluates to false and the "APP_NAME (Laravel)" input
+        // never renders. We synthesize the field on the fly with
+        // the default "Laravel RootKit" value so the operator can
+        // see + change it; persistence via saveExtraFields() on
+        // Save creates the environment_variables row the first
+        // time they edit it.
+        if ($this->isLaravelRootkitStack() && ! $this->fields->has('SERVICE_LARAVEL_APP_NAME')) {
+            $appName = $this->service->environment_variables()
+                ->where('key', 'SERVICE_LARAVEL_APP_NAME')
+                ->first();
+
+            $this->fields->put('SERVICE_LARAVEL_APP_NAME', [
+                'serviceName' => 'SERVICE_LARAVEL_APP_NAME',
+                'key' => 'SERVICE_LARAVEL_APP_NAME',
+                'name' => 'APP_NAME (Laravel)',
+                'value' => data_get($appName, 'value', 'Laravel RootKit'),
+                'isPassword' => false,
+                'rules' => 'nullable|string|max:120',
+                'customHelper' => 'Laravel APP_NAME. On Save, Coolify pushes the new value into the /var/www/html/.env of THIS service\'s laravel container (no other services touched), runs php artisan config:cache, and the next request serves the updated config("app.name"). No Redeploy needed.',
+            ]);
+            $this->validationAttributes['fields.SERVICE_LARAVEL_APP_NAME.value'] = 'APP_NAME';
+        }
+
         if (! $this->fields->has('SERVICE_PHP_VERSION')) {
             $phpVersion = $this->service->environment_variables()
                 ->where('key', 'SERVICE_PHP_VERSION')

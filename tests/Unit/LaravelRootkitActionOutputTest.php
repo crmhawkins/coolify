@@ -354,6 +354,26 @@ it('propagates APP_NAME changes to the live Laravel .env on Save (no redeploy ne
         ->toContain('UNCHANGED');
 });
 
+it('backfills SERVICE_LARAVEL_APP_NAME in mount() for services missing the env var', function () {
+    $stackForm = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    // Services created with the old template (pre-489a42864) or
+    // while service-templates-latest.json was still cached on the
+    // old version do NOT have a SERVICE_LARAVEL_APP_NAME row in
+    // environment_variables. Without a backfill the blade guard
+    // $fields->has(...) evaluates to false and the input never
+    // renders. Same recovery pattern the mount() already uses for
+    // SERVICE_GITHUB_TOKEN and SERVICE_GITHUB_BRANCH: synthesize
+    // the field in $fields with the default value and let
+    // saveExtraFields() persist it on first Save.
+    expect($stackForm)
+        ->toContain("\$this->isLaravelRootkitStack() && ! \$this->fields->has('SERVICE_LARAVEL_APP_NAME')")
+        ->toContain("->where('key', 'SERVICE_LARAVEL_APP_NAME')")
+        ->toContain("'value' => data_get(\$appName, 'value', 'Laravel RootKit')")
+        ->toContain("'name' => 'APP_NAME (Laravel)'")
+        ->toContain("'rules' => 'nullable|string|max:120'");
+});
+
 it('exposes SERVICE_LARAVEL_APP_NAME so operators can edit APP_NAME inline in the stack form', function () {
     $template  = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
     $blade     = file_get_contents(__DIR__.'/../../resources/views/livewire/project/service/stack-form.blade.php');
