@@ -624,11 +624,36 @@ class StackForm extends Component
             ."echo ''; echo 'Migration status after run:'; "
             ."php artisan migrate:status --no-ansi 2>&1 || true; "
             ."else echo 'ERROR: migrations failed'; echo 'Failed at: php artisan migrate --force'; sed -n '1,2000p' \"\$MIGRATION_OUTPUT_FILE\"; "
-            // Actionable hint for the two most common migration
-            // failures we actually hit in this fork's CRMs.
+            // Actionable hints for the migration failures we actually
+            // hit in this fork's CRMs. Each grep only fires when its
+            // SQLSTATE / message signature is present in the captured
+            // output, so on unrelated failures the hint block stays
+            // silent. Adding a new hint here is cheap: a single grep
+            // line per pattern.
             ."if grep -qE 'Duplicate entry .0. for key .PRIMARY.' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: a PRIMARY KEY column lost its AUTO_INCREMENT attribute (common after restoring from a dump). Fix with: ALTER TABLE <table> MODIFY <pk_col> BIGINT UNSIGNED NOT NULL AUTO_INCREMENT;'; fi; "
             ."if grep -qE 'SQLSTATE\\[HY000\\] \\[1049\\]' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: the database does not exist. Check DB_DATABASE matches the MariaDB container env, and that Coolify created the DB on first boot.'; fi; "
             ."if grep -qE 'SQLSTATE\\[HY000\\] \\[200[2-3]\\]' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: cannot connect to the database. Check DB_HOST / DB_PORT and that the mariadb container is Running (healthy).'; fi; "
+            // SQLSTATE[42S01] 1050 = "Base table or view already exists".
+            // Happens when a migration tries to CREATE a table that is
+            // already on disk but is NOT recorded in the `migrations`
+            // table — usually after restoring a partial dump, or after
+            // someone ran the migration manually and then truncated the
+            // migrations table. The hint lists the two safe fixes so
+            // the operator can pick depending on whether the existing
+            // table has data.
+            ."if grep -qE 'SQLSTATE\\[42S01\\]' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: a migration tried to create a table that already exists in the DB but is missing from the `migrations` table. Two fixes: (a) if the existing table is empty — DROP TABLE <name>; and re-run migrations; (b) if it has data — INSERT INTO migrations (migration, batch) VALUES (\"<full_migration_filename_without_.php>\", (SELECT COALESCE(MAX(batch),0)+1 FROM (SELECT batch FROM migrations) AS m)); and re-run.'; fi; "
+            // SQLSTATE[42S21] 1060 = "Duplicate column name". Same
+            // family of problem but at column level — an ALTER TABLE
+            // ... ADD COLUMN chocked because the column is already
+            // there. Same two fixes apply (rollback the ADD, or mark
+            // the migration as applied) but we guide the operator to
+            // the simplest one.
+            ."if grep -qE 'SQLSTATE\\[42S21\\]|Duplicate column name' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: a migration tried to ADD a column that already exists on the table. Mark the migration as applied without running it: INSERT INTO migrations (migration, batch) VALUES (\"<migration_filename_without_.php>\", (SELECT COALESCE(MAX(batch),0)+1 FROM (SELECT batch FROM migrations) AS m));'; fi; "
+            // Foreign key constraint failures are almost always caused
+            // by orphan rows in the child table. Point the operator at
+            // the two subqueries they need to diagnose which rows are
+            // the culprits.
+            ."if grep -qE 'SQLSTATE\\[23000\\].*foreign key|Cannot add or update a child row' \"\$MIGRATION_OUTPUT_FILE\" 2>/dev/null; then echo 'HINT: a foreign key constraint failed. The child table has rows pointing to a parent id that does not exist. Find them with: SELECT * FROM <child> c LEFT JOIN <parent> p ON c.<fk_col>=p.id WHERE p.id IS NULL; Then either fix / delete the orphans or make the column nullable before the migration.'; fi; "
             ."exit 1; fi; "
             ."else echo 'artisan file not found'; exit 1; fi"
         );

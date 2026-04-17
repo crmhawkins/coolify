@@ -45,14 +45,22 @@ it('run migrations handles package discovery, extension check, and common failur
         // Output limit lifted from 500 to 2000 lines so first-time
         // migrations on CRMs with 100+ migrations do not get truncated.
         ->toContain("sed -n '1,2000p'")
-        // Actionable hints for the three failure modes we actually hit
+        // Actionable hints for the six failure modes we actually hit
         // in production on this fork:
         //   1. action_scheduler_logs / dumped PK without AUTO_INCREMENT
         //   2. unknown database (DB_DATABASE mismatch)
         //   3. connection refused (mariadb not ready / wrong DB_HOST)
+        //   4. SQLSTATE[42S01] table already exists (restored dump,
+        //      migrations table out of sync with schema)
+        //   5. SQLSTATE[42S21] / Duplicate column name (same family
+        //      but at column level)
+        //   6. SQLSTATE[23000] foreign key constraint failure
         ->toContain("a PRIMARY KEY column lost its AUTO_INCREMENT attribute")
         ->toContain('the database does not exist')
-        ->toContain('cannot connect to the database');
+        ->toContain('cannot connect to the database')
+        ->toContain('a migration tried to create a table that already exists')
+        ->toContain('a migration tried to ADD a column that already exists')
+        ->toContain('a foreign key constraint failed');
 });
 
 it('hardens deployLaravelChanges against dubious ownership, broken .git and missing vendor', function () {
