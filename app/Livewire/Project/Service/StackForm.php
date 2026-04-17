@@ -930,6 +930,25 @@ SHELL;
             $this->fields->forget('SERVICE_GITHUB_TOKEN');
         }
 
+        // Snapshot APP_NAME BEFORE the save so we can detect whether
+        // the operator just changed it and, if so, live-patch the
+        // Laravel .env inside the running container. We read straight
+        // from the DB (not from $this->fields, which already contains
+        // the pending new value) so the diff is accurate.
+        $oldAppName = null;
+        if ($this->isLaravelRootkitStack()) {
+            try {
+                $row = $this->service->environment_variables()
+                    ->where('key', 'SERVICE_LARAVEL_APP_NAME')
+                    ->first();
+                $oldAppName = $row?->value;
+            } catch (\Throwable $e) {
+                // Non-fatal: if we can't read the old value we simply
+                // fall through to unconditional propagation below.
+                $oldAppName = null;
+            }
+        }
+
         try {
             $this->setFieldValueIfPresent('SERVICE_URL_LARAVEL', '');
             $this->validate();
@@ -949,6 +968,26 @@ SHELL;
             $this->service->refresh();
             $this->service->saveComposeConfigs();
 
+            // Live-patch APP_NAME inside the laravel container if the
+            // operator changed it. Without this the compose file on
+            // disk has the new value but the running container keeps
+            // serving the old APP_NAME until a Redeploy — which is
+            // surprising because the Save button looks like it should
+            // "just work". We only do this when the value actually
+            // changed (including going from "never set" to any value)
+            // so unchanged saves stay cheap.
+            if ($this->isLaravelRootkitStack()) {
+                $newAppName = trim((string) data_get($this->fields, 'SERVICE_LARAVEL_APP_NAME.value', ''));
+                if ($newAppName !== '' && $newAppName !== (string) $oldAppName) {
+                    if ($this->propagateAppNameToLaravelEnv($newAppName)) {
+                        $notify && $this->dispatch(
+                            'success',
+                            "APP_NAME actualizado en el .env del contenedor live. Laravel lee el nuevo valor en el siguiente request sin Redeploy."
+                        );
+                    }
+                }
+            }
+
             $this->dispatch('refreshEnvs');
             $this->dispatch('refreshServices');
             $notify && $this->dispatch('success', 'Service saved.');
@@ -964,6 +1003,107 @@ SHELL;
             } else {
                 $this->dispatch('configurationChanged');
             }
+        }
+    }
+
+    /**
+     * Live-patches APP_NAME inside the /var/www/html/.env of the
+     * running laravel-rootkit container so Laravel's config('app.name')
+     * returns the new value without waiting for a Redeploy.
+     *
+     * Uses the same upsert_env semantics the entrypoint runs on first
+     * boot (in-place sed if the key exists, append otherwise), so the
+     * resulting .env line is identical to what a fresh container
+     * would produce. After updating the file we fire
+     * `php artisan config:clear` + `config:cache` so the cached
+     * bootstrap config reflects the new value on the very next
+     * request (Laravel does not re-read .env on every request when
+     * config:cache has been run).
+     *
+     * Silent no-op and returns false when the container is not
+     * running, the .env file is missing, or docker exec errors out —
+     * we do not want a save-time env propagation failure to bubble up
+     * as an error dialog and block the actual field persistence
+     * (that already succeeded in the DB transaction above).
+     */
+    private function propagateAppNameToLaravelEnv(string $newAppName): bool
+    {
+        try {
+            $context = $this->getLaravelContainerContext();
+            if (! $context) {
+                return false;
+            }
+
+            $server = $context['server'];
+            $escapedContainer = $context['escapedContainer'];
+
+            // Rather than do the .env edit with `sed` (which gets into
+            // an escape-hell because the value can legitimately contain
+            // `/`, `&`, quotes, slashes, and both those characters have
+            // meaning in sed's replacement side), we pass the new value
+            // as a docker-exec environment variable and do the edit
+            // with a small `php -r` one-liner inside the container.
+            // That turns escaping into a well-defined boundary:
+            //
+            //   - Host → docker exec: passes $newAppName verbatim via
+            //     `-e APP_NAME_NEW=<value>`, handled by docker.
+            //   - Container shell → php -r: no interpolation needed.
+            //     The PHP script reads getenv("APP_NAME_NEW") so no
+            //     shell expansion touches the value.
+            //   - PHP → .env file: file_put_contents writes bytes
+            //     as-is; we only add `"..."` quoting around the value
+            //     and escape `"` → `\"` so the line is valid .env
+            //     syntax when parsed by vlucas/phpdotenv.
+            //
+            // Net result: values like `Taola CRM`, `Taola/CRM &
+            // Partners`, `A "quoted" name`, `Polako — v2` all land in
+            // .env as a single valid APP_NAME=... line.
+            $phpScript = <<<'PHP'
+$file = "/var/www/html/.env";
+if (!file_exists($file)) { echo "NO_ENV"; exit(0); }
+$value = (string) getenv("COOLIFY_APP_NAME_NEW");
+$escaped = str_replace(["\\\\", "\""], ["\\\\\\\\", "\\\""], $value);
+$line = "APP_NAME=\"{$escaped}\"";
+$current = file_get_contents($file);
+if (preg_match("/^APP_NAME=.*/m", $current)) {
+    $new = preg_replace("/^APP_NAME=.*/m", $line, $current, 1);
+} else {
+    $new = rtrim($current, "\n") . "\n" . $line . "\n";
+}
+if ($new === $current) { echo "UNCHANGED"; exit(0); }
+file_put_contents($file, $new);
+echo "UPDATED";
+PHP;
+
+            $script = 'cd /var/www/html'
+                .' && php -r '.escapeshellarg($phpScript)
+                .' && php artisan config:clear >/dev/null 2>&1 || true'
+                .' && php artisan config:cache >/dev/null 2>&1 || true';
+
+            // docker exec -e KEY=VALUE is quirky: docker CLI takes the
+            // whole `KEY=VALUE` argument as a single shell word, so
+            // shell-special characters inside VALUE (spaces, quotes,
+            // $, backticks, &, |) would break the outer docker exec
+            // command line if passed raw. escapeshellarg wraps the
+            // whole `KEY=VALUE` in single quotes and handles embedded
+            // single quotes via the POSIX `'\''` sequence, which is
+            // exactly what we need.
+            $envArg = escapeshellarg('COOLIFY_APP_NAME_NEW='.$newAppName);
+            $command = "docker exec -e {$envArg} {$escapedContainer} sh -lc ".escapeshellarg($script);
+            if ($server->isNonRoot()) {
+                $command = "sudo {$command}";
+            }
+
+            $output = (string) (instant_remote_process([$command], $server, false) ?? '');
+
+            return str_contains($output, 'UPDATED') || str_contains($output, 'UNCHANGED');
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('APP_NAME propagation failed', [
+                'service' => $this->service->uuid ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
         }
     }
 

@@ -299,6 +299,37 @@ it('guards git operations against dubious ownership and interactive prompts', fu
         ->toContain('HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured.');
 });
 
+it('propagates APP_NAME changes to the live Laravel .env on Save (no redeploy needed)', function () {
+    $stackForm = file_get_contents(__DIR__.'/../../app/Livewire/Project/Service/StackForm.php');
+
+    expect($stackForm)
+        // Helper exists and is wired into submit()
+        ->toContain('propagateAppNameToLaravelEnv')
+        // submit() must snapshot the old value BEFORE sync/save so the
+        // change-detection diff is accurate (reading from $this->fields
+        // after save would always look unchanged).
+        ->toContain("->where('key', 'SERVICE_LARAVEL_APP_NAME')")
+        // Success toast advertises that Laravel picks up the new value
+        // without Redeploy — that's the whole point of this helper.
+        ->toContain("APP_NAME actualizado en el .env del contenedor live. Laravel lee el nuevo valor en el siguiente request sin Redeploy.")
+        // Implementation uses docker exec -e COOLIFY_APP_NAME_NEW=...
+        // + a php -r one-liner inside the container, not sed. The sed
+        // approach breaks on values with `/` or `&` (legitimate
+        // characters in an app name like "Hawkins/CRM & Partners").
+        ->toContain('COOLIFY_APP_NAME_NEW=')
+        ->toContain('getenv("COOLIFY_APP_NAME_NEW")')
+        // After editing .env the helper clears + caches config so the
+        // next request picks up the new value (Laravel does not re-read
+        // .env on every request when config:cache has run).
+        ->toContain('php artisan config:clear')
+        ->toContain('php artisan config:cache')
+        // UPDATED / UNCHANGED sentinels gate the success dispatch — if
+        // neither came back, the helper returns false and the caller
+        // silently skips the toast.
+        ->toContain('UPDATED')
+        ->toContain('UNCHANGED');
+});
+
 it('exposes SERVICE_LARAVEL_APP_NAME so operators can edit APP_NAME inline in the stack form', function () {
     $template  = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
     $blade     = file_get_contents(__DIR__.'/../../resources/views/livewire/project/service/stack-form.blade.php');
