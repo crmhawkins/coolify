@@ -266,28 +266,79 @@ services:
 
           if [ ! -d .git ]; then
             if [ -n "${GITHUB_TOKEN}" ]; then
-              echo "Cloning repository (branch: ${REPO_BRANCH}) using GitHub token..."
+              echo "Initializing repository (branch: ${REPO_BRANCH}) using GitHub token..."
             else
-              echo "Cloning repository ${REPO_URL_PUBLIC} (branch: ${REPO_BRANCH})..."
+              echo "Initializing repository ${REPO_URL_PUBLIC} (branch: ${REPO_BRANCH})..."
             fi
-            rm -rf * .[!.]* 2>/dev/null || true
-            # Hard-fail on first clone: there is nothing to serve if the
-            # initial clone did not produce a working tree. Without this
-            # the script would continue under `set -e` but the error
-            # message would be an opaque git stderr instead of the
-            # actionable "check SERVICE_GITHUB_* settings" hint below.
+            # IMPORTANT: we cannot use `git clone . ...` here because
+            # /var/www/html has a sub-mountpoint at /var/www/html/storage
+            # (the dedicated laravel-storage named volume). `rm -rf` does
+            # not remove mountpoints (it can only empty them), so the
+            # `storage/` directory always exists before the clone and
+            # `git clone` refuses with "destination path '.' already
+            # exists and is not an empty directory". That put new
+            # services in a crashloop.
+            #
+            # Workaround: initialise the repo in place with `git init`
+            # and then `git fetch` + `git checkout -f`. This pattern
+            # works on non-empty directories because:
+            #   * git init only creates the .git metadata
+            #   * git fetch populates remote refs into .git, no working
+            #     tree writes
+            #   * git checkout -f overwrites tracked files, and leaves
+            #     untracked files (the storage mount contents) intact
+            #
+            # We still wipe top-level garbage that might confuse
+            # `git checkout -f` later, but we are careful to NOT
+            # recurse into storage/ (which is the mount) and NOT
+            # follow any stray symlinks.
+            find . -mindepth 1 -maxdepth 1 \
+                   ! -name 'storage' \
+                   ! -name '.' \
+                   ! -name '..' \
+                   -exec rm -rf {} + 2>/dev/null || true
+
             set +e
-            git clone --depth 1 --no-tags --branch "${REPO_BRANCH}" --single-branch "${REPO_URL}" . 2>&1
-            CLONE_EXIT="$?"
+            git init -q . 2>&1
+            INIT_EXIT="$?"
             set -e
-            if [ "$CLONE_EXIT" -ne 0 ]; then
-              echo "FATAL: git clone failed for ${REPO_URL_PUBLIC} (branch ${REPO_BRANCH})."
+            if [ "$INIT_EXIT" -ne 0 ]; then
+              echo "FATAL: git init failed in /var/www/html. The volume is likely unwritable."
+              exit 1
+            fi
+
+            # Add origin (or reset it if a previous failed init left one).
+            git remote add origin "${REPO_URL}" 2>/dev/null || git remote set-url origin "${REPO_URL}"
+
+            set +e
+            if [ -n "${GITHUB_TOKEN}" ]; then
+              AUTH_B64="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0 2>/dev/null \
+                || printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+              git -c "http.extraHeader=Authorization: Basic ${AUTH_B64}" \
+                  fetch --depth 1 --no-tags origin "${REPO_BRANCH}" 2>&1
+              FETCH_EXIT="$?"
+              unset AUTH_B64
+            else
+              git fetch --depth 1 --no-tags origin "${REPO_BRANCH}" 2>&1
+              FETCH_EXIT="$?"
+            fi
+            set -e
+
+            if [ "$FETCH_EXIT" -ne 0 ]; then
+              echo "FATAL: git fetch failed for ${REPO_URL_PUBLIC} (branch ${REPO_BRANCH})."
               echo "Check SERVICE_GITHUB_REPO_URL, SERVICE_GITHUB_BRANCH, SERVICE_GITHUB_TOKEN and that the container can reach github.com."
               echo "If the repository is private, set SERVICE_GITHUB_TOKEN in the Coolify service environment — the container has no TTY and cannot prompt for credentials interactively."
               exit 1
             fi
+
+            # -f overwrites tracked files (any leftover after the find
+            # above). Untracked files in storage/ stay intact — that is
+            # intentional, it is where user uploads live.
+            git checkout -f -B "${REPO_BRANCH}" "origin/${REPO_BRANCH}" 2>&1
+
             # Remove the token from .git/config so a long-lived container
-            # cannot leak it. Subsequent fetches use GIT_ASKPASS below.
+            # cannot leak it. Subsequent fetches use the one-shot
+            # http.extraHeader injection in the else branch below.
             git remote set-url origin "${REPO_URL_PUBLIC}"
           else
             echo "Repository already exists. Syncing branch ${REPO_BRANCH}..."

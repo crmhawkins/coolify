@@ -223,7 +223,13 @@ it('configures laravel rootkit to use file cache and guarded schedule run mode',
         // Security and robustness fixes applied to the entrypoint.
         ->toContain('REPO_URL_PUBLIC')
         ->toContain('git remote set-url origin "${REPO_URL_PUBLIC}"')
-        ->toContain('git clone --depth 1 --no-tags')
+        // First-boot init uses git init + fetch + checkout (NOT
+        // git clone .) because /var/www/html has a storage
+        // mountpoint that makes the destination non-empty and
+        // `git clone` refuses. See the matching it() block below
+        // for the full rationale.
+        ->toContain('git init -q .')
+        ->toContain('git fetch --depth 1 --no-tags origin')
         ->toContain('DEFAULT_BRANCH="$(git symbolic-ref')
         // Scheduler and queue workers must run as the php-fpm user so cache
         // and session files are not created as root.
@@ -297,6 +303,31 @@ it('guards git operations against dubious ownership and interactive prompts', fu
         // SERVICE_GITHUB_TOKEN so operators know exactly what to fix.
         ->toContain("grep -q 'could not read Username'")
         ->toContain('HINT: the repository looks private and no valid SERVICE_GITHUB_TOKEN is configured.');
+});
+
+it('boots new services without crashlooping on the storage mountpoint (git init + fetch, never git clone .)', function () {
+    $template = file_get_contents(__DIR__.'/../../templates/compose/laravel-rootkit.yaml');
+
+    // Since f37c8616f the entrypoint can no longer run `git clone .`
+    // on first boot: /var/www/html has a sub-mountpoint at
+    // /var/www/html/storage (the dedicated laravel-storage volume)
+    // that `rm -rf` cannot remove, so `git clone .` always saw a
+    // non-empty destination and failed with "destination path '.'
+    // already exists and is not an empty directory", putting every
+    // brand-new service in a crashloop. Fix is git init + fetch +
+    // checkout which tolerates a non-empty directory.
+    expect($template)
+        // Hard-not: the old `git clone . ...` pattern must never come
+        // back — if it does, any new service with the storage split
+        // template crashlops out of the gate.
+        ->not->toContain('git clone --depth 1 --no-tags --branch "${REPO_BRANCH}" --single-branch "${REPO_URL}" .')
+        ->toContain('git init -q .')
+        ->toContain('git fetch --depth 1 --no-tags origin "${REPO_BRANCH}"')
+        ->toContain('git checkout -f -B "${REPO_BRANCH}" "origin/${REPO_BRANCH}"')
+        // The pre-init cleanup must EXCLUDE storage so the mount
+        // stays intact (otherwise the next `rm -rf` try tries to
+        // tear down the mountpoint and leaves the tree in limbo).
+        ->toContain("! -name 'storage'");
 });
 
 it('isolates /var/www/html/storage in its own named volume so uploads survive any redeploy', function () {
@@ -425,10 +456,10 @@ it('hardens laravel rootkit boot pipeline so broken deploys surface as unhealthy
         // fallback when PHP 500s (missing vendor, php-fpm down, etc).
         ->toContain('error_page 500 502 503 504 /_coolify_error.html;')
         ->toContain('location = /_coolify_error.html {')
-        // Fix 5 — first-time git clone is a hard fail with an actionable
-        // message pointing at the SERVICE_GITHUB_* env vars instead of a
-        // raw git stderr buried in container logs.
-        ->toContain('FATAL: git clone failed')
+        // Fix 5 — first-time repo init is a hard fail with an
+        // actionable message pointing at the SERVICE_GITHUB_* env vars
+        // instead of a raw git stderr buried in container logs.
+        ->toContain('FATAL: git fetch failed')
         ->toContain('Check SERVICE_GITHUB_REPO_URL, SERVICE_GITHUB_BRANCH, SERVICE_GITHUB_TOKEN')
         // Fix 6 — scheduler and queue-worker block on both artisan AND
         // vendor/autoload.php before starting, so they stop crash-looping
